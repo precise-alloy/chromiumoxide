@@ -50,7 +50,7 @@ pub fn default_executable(options: DetectionOptions) -> Result<std::path::PathBu
 
 fn get_by_env_var() -> Option<PathBuf> {
     if let Ok(path) = env::var("CHROME")
-        && Path::new(&path).exists()
+        && Path::new(&path).is_file()
     {
         return Some(path.into());
     }
@@ -141,7 +141,7 @@ fn get_by_path(options: &DetectionOptions) -> Option<PathBuf> {
         if !allowed {
             continue;
         }
-        if Path::new(path).exists() {
+        if Path::new(path).is_file() {
             return Some(path.into());
         }
     }
@@ -160,4 +160,5 @@ fn get_by_registry() -> Option<PathBuf> {
         .and_then(|key| key.get_string(""))
         .map(PathBuf::from)
         .ok()
+        .filter(|path| path.is_file())
 }

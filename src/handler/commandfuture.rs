@@ -25,7 +25,7 @@ pin_project! {
         // and we need to be able to poll it
         // it is used to timeout the command if page was closed while waiting for response
         #[pin]
-        delay: futures_timer::Delay,
+        delay: tokio::time::Sleep,
 
         message: Option<TargetMessage>,
 
@@ -49,7 +49,7 @@ impl<T: Command> CommandFuture<T> {
             cmd, tx, session,
         )?));
 
-        let delay = futures_timer::Delay::new(request_timeout);
+        let delay = tokio::time::sleep(request_timeout);
 
         Ok(Self {
             target_sender,
