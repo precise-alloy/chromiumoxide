@@ -111,7 +111,11 @@ impl Browser {
         let mut debug_ws_url = url.into();
 
         if debug_ws_url.starts_with("http") {
-            match reqwest::Client::new()
+            let client = reqwest::Client::builder()
+                .timeout(config.request_timeout)
+                .build()
+                .map_err(|_| CdpError::NoResponse)?;
+            match client
                 .get(
                     if debug_ws_url.ends_with("/json/version")
                         || debug_ws_url.ends_with("/json/version/")
