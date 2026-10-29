@@ -160,8 +160,8 @@ impl NetworkManager {
         if enabled == self.protocol_request_interception_enabled {
             return;
         }
-        self.update_protocol_cache_disabled();
         self.protocol_request_interception_enabled = enabled;
+        self.update_protocol_cache_disabled();
         if enabled {
             self.push_cdp_request(
                 fetch::EnableParams::builder()
@@ -328,4 +328,34 @@ pub enum NetworkEvent {
     Response(RequestId),
     RequestFailed(HttpRequest),
     RequestFinished(HttpRequest),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_interception_updates_cache_disabled_with_new_state() {
+        let mut manager = NetworkManager::new(true, Duration::from_secs(30));
+        manager.set_request_interception(true);
+        let first = manager.poll().expect("cache command");
+        match first {
+            NetworkEvent::SendCdpRequest((method, params)) => {
+                assert_eq!(method.as_ref(), "Network.setCacheDisabled");
+                assert_eq!(params["cacheDisabled"], true);
+            }
+            other => panic!("expected Network.setCacheDisabled, got {other:?}"),
+        }
+        let _ = manager.poll(); // Fetch.enable
+
+        manager.set_request_interception(false);
+        let third = manager.poll().expect("cache restore command");
+        match third {
+            NetworkEvent::SendCdpRequest((method, params)) => {
+                assert_eq!(method.as_ref(), "Network.setCacheDisabled");
+                assert_eq!(params["cacheDisabled"], false);
+            }
+            other => panic!("expected Network.setCacheDisabled, got {other:?}"),
+        }
+    }
 }
