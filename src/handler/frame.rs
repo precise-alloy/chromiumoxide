@@ -113,6 +113,7 @@ impl Frame {
     }
 
     fn navigated(&mut self, frame: &CdpFrame) {
+        self.loader_id = Some(frame.loader_id.clone());
         self.name.clone_from(&frame.name);
         let url = if let Some(ref fragment) = frame.url_fragment {
             format!("{}{fragment}", frame.url)

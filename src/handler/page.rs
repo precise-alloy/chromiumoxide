@@ -10,10 +10,7 @@ use chromiumoxide_cdp::cdp::browser_protocol::dom::{
     DiscardSearchResultsParams, GetSearchResultsParams, NodeId, PerformSearchParams,
     QuerySelectorAllParams, QuerySelectorParams, Rgba,
 };
-use chromiumoxide_cdp::cdp::browser_protocol::emulation::{
-    ClearDeviceMetricsOverrideParams, SetDefaultBackgroundColorOverrideParams,
-    SetDeviceMetricsOverrideParams,
-};
+use chromiumoxide_cdp::cdp::browser_protocol::emulation::SetDefaultBackgroundColorOverrideParams;
 use chromiumoxide_cdp::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
     MouseButton,
@@ -419,6 +416,7 @@ impl PageInner {
             let width = metrics.css_content_size.width;
             let height = metrics.css_content_size.height;
 
+            cdp_params.capture_beyond_viewport = Some(true);
             cdp_params.clip = Some(Viewport {
                 x: 0.,
                 y: 0.,
@@ -426,14 +424,6 @@ impl PageInner {
                 height,
                 scale: 1.,
             });
-
-            self.execute(SetDeviceMetricsOverrideParams::new(
-                width as i64,
-                height as i64,
-                1.,
-                false,
-            ))
-            .await?;
         }
 
         if omit_background {
@@ -448,17 +438,15 @@ impl PageInner {
             .await?;
         }
 
-        let res = self.execute(cdp_params).await?.result;
+        let res = self.execute(cdp_params).await;
 
         if omit_background {
-            self.execute(SetDefaultBackgroundColorOverrideParams { color: None })
-                .await?;
+            let _ = self
+                .execute(SetDefaultBackgroundColorOverrideParams { color: None })
+                .await;
         }
 
-        if full_page {
-            self.execute(ClearDeviceMetricsOverrideParams {}).await?;
-        }
-
+        let res = res?.result;
         Ok(utils::base64::decode(&res.data)?)
     }
 }
