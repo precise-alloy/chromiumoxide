@@ -48,6 +48,8 @@ pub struct Browser {
     debug_ws_url: String,
     /// The context of the browser
     browser_context: BrowserContext,
+    /// Whether `Browser::close` was called on this instance
+    close_requested: bool,
 }
 
 /// See [`Browser::page_lookup`].
@@ -160,6 +162,7 @@ impl Browser {
             child: None,
             debug_ws_url,
             browser_context,
+            close_requested: false,
         };
         Ok((browser, fut))
     }
@@ -238,6 +241,7 @@ impl Browser {
             child: Some(child),
             debug_ws_url,
             browser_context,
+            close_requested: false,
         };
 
         Ok((browser, fut))
@@ -270,6 +274,7 @@ impl Browser {
     /// [`Browser::wait_sync`], [`Browser::try_wait`]).
     /// [`Browser::drop`] waits automatically if needed.
     pub async fn close(&mut self) -> Result<CloseReturns> {
+        self.close_requested = true;
         let (tx, rx) = oneshot_channel();
 
         self.sender
@@ -564,6 +569,9 @@ impl Browser {
 impl Drop for Browser {
     fn drop(&mut self) {
         if let Some(child) = self.child.as_mut() {
+            if self.close_requested {
+                return;
+            }
             if let Ok(Some(_)) = child.try_wait() {
                 // Already exited, do nothing. Usually occurs after using the method close or kill.
             } else {

@@ -951,20 +951,28 @@ impl Page {
 
     /// Set all the cookies
     pub async fn set_cookies(&self, mut cookies: Vec<CookieParam>) -> Result<&Self> {
-        let url = self
-            .url()
-            .await?
-            .ok_or_else(|| CdpError::msg("Page url not found"))?;
-        let is_http = url.starts_with("http");
-        if !is_http {
-            validate_cookie_url(&url)?;
-        }
-
+        let mut page_url: Option<(String, bool)> = None;
         for cookie in &mut cookies {
             if let Some(url) = cookie.url.as_ref() {
                 validate_cookie_url(url)?;
-            } else if is_http {
-                cookie.url = Some(url.clone());
+            } else {
+                let (url, is_http) = match page_url.as_ref() {
+                    Some(cached) => cached,
+                    None => {
+                        let url = self
+                            .url()
+                            .await?
+                            .ok_or_else(|| CdpError::msg("Page url not found"))?;
+                        let is_http = url.starts_with("http");
+                        if !is_http {
+                            validate_cookie_url(&url)?;
+                        }
+                        page_url.insert((url, is_http))
+                    }
+                };
+                if *is_http {
+                    cookie.url = Some(url.clone());
+                }
             }
         }
         self.delete_cookies_unchecked(cookies.iter().map(DeleteCookiesParams::from_cookie))
