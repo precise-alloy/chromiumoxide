@@ -247,6 +247,18 @@ impl FrameManager {
         self.isolated_worlds.clear();
     }
 
+    /// Drain all active, queued, and failed navigation identifiers owned by this frame manager so
+    /// the handler can fail their waiting callers when the target itself is removed.
+    pub(crate) fn drain_navigation_ids(&mut self) -> Vec<NavigationId> {
+        let mut ids = Vec::new();
+        if let Some((watcher, _)) = self.navigation.take() {
+            ids.push(watcher.id);
+        }
+        ids.extend(self.pending_navigations.drain(..).map(|(req, _)| req.id));
+        ids.extend(self.failed_navigations.drain(..));
+        ids
+    }
+
     /// The commands to execute in order to initialize this frame manager.
     /// The `_stealth_mode` parameter is reserved for future per-command control.
     pub fn init_commands(timeout: Duration, _stealth_mode: bool) -> CommandChain {

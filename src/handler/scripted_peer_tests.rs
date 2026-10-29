@@ -616,7 +616,7 @@ async fn an_auto_attached_child_is_initialised_like_the_root() {
     }
 
     let _ = stop.send(());
-    let handler = task.await.expect("handler task");
+    let mut handler = task.await.expect("handler task");
     let nested = handler
         .get_target(&TargetId::from(NESTED_TARGET.to_string()))
         .expect("the nested child is tracked");
@@ -627,6 +627,18 @@ async fn an_auto_attached_child_is_initialised_like_the_root() {
     assert_eq!(
         nested.frame_manager().main_frame().map(|f| f.id().as_ref()),
         Some(NESTED_FRAME)
+    );
+    handler.on_child_detached(&CHILD_SESSION.to_string().into());
+    assert!(
+        handler
+            .get_target(&TargetId::from(CHILD_TARGET.to_string()))
+            .is_none()
+    );
+    assert!(
+        handler
+            .get_target(&TargetId::from(NESTED_TARGET.to_string()))
+            .is_none(),
+        "detaching a parent child frame must also clean up nested child frames"
     );
 }
 

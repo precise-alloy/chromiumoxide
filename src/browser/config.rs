@@ -97,6 +97,9 @@ pub struct BrowserConfig {
 
     /// Avoid easy bot detection by setting `navigator.webdriver` to false
     pub(crate) hidden: bool,
+
+    /// Whether a page that loses its session automatically re-attaches in place.
+    pub session_recovery: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +125,7 @@ pub struct BrowserConfigBuilder {
     request_intercept: bool,
     cache_enabled: bool,
     hidden: bool,
+    session_recovery: bool,
 }
 
 impl BrowserConfig {
@@ -158,6 +162,7 @@ impl Default for BrowserConfigBuilder {
             request_intercept: false,
             cache_enabled: true,
             hidden: false,
+            session_recovery: true,
         }
     }
 }
@@ -334,6 +339,16 @@ impl BrowserConfigBuilder {
         self
     }
 
+    pub fn session_recovery(mut self, enabled: bool) -> Self {
+        self.session_recovery = enabled;
+        self
+    }
+
+    pub fn disable_session_recovery(mut self) -> Self {
+        self.session_recovery = false;
+        self
+    }
+
     pub fn build(self) -> std::result::Result<BrowserConfig, String> {
         let executable = if let Some(e) = self.executable {
             e
@@ -362,6 +377,7 @@ impl BrowserConfigBuilder {
             request_intercept: self.request_intercept,
             cache_enabled: self.cache_enabled,
             hidden: self.hidden,
+            session_recovery: self.session_recovery,
         })
     }
 }

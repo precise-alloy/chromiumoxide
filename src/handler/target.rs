@@ -769,7 +769,10 @@ impl Target {
                     && !self.reattaching
                 {
                     // A refused first attach never owned a session. End the
-                    // attempt and answer both callers without closing the tab.
+                    // attempt, mark it not desired so discovery does not
+                    // immediately retry a refused target, and answer both
+                    // callers without closing the tab.
+                    self.desired_attached = false;
                     self.give_up_recovery(CdpError::Chrome(err.clone()));
                     return;
                 }
@@ -1051,8 +1054,11 @@ impl Target {
                                     return self.poll(cx, now);
                                 }
                             }
-                            // Stealth: skip Network.enable unless request_intercept is needed
-                            if self.config.stealth_mode && !self.config.request_intercept {
+                            // Stealth: skip Network.enable unless request_intercept or cache disable is needed
+                            if self.config.stealth_mode
+                                && !self.config.request_intercept
+                                && self.config.cache_enabled
+                            {
                                 self.init_state =
                                     TargetInit::InitializingPage(Self::page_init_commands(
                                         self.config.request_timeout,
@@ -1307,6 +1313,12 @@ impl Target {
     /// Set the sender half of the channel who requested the creation of this
     /// target
     pub fn set_initiator(&mut self, tx: Sender<Result<Page>>) {
+        if matches!(self.init_state, TargetInit::Closing)
+            || (self.is_initialized() && self.session_id.is_none() && !self.attach_in_flight)
+        {
+            let _ = tx.send(Err(CdpError::NoResponse));
+            return;
+        }
         self.initiator = Some(tx);
     }
 
@@ -1651,7 +1663,37 @@ mod init_error_tests {
         assert!(t.init_error.is_none());
         assert!(t.is_initialized());
         assert!(!t.expects_session());
+        assert!(
+            !t.wants_revival(),
+            "discovery must not automatically retry a refused first attach"
+        );
         assert!(poll(&mut t).is_none());
+        let (late_tx, mut late_rx) = futures::channel::oneshot::channel();
+        t.set_initiator(late_tx);
+        assert!(
+            matches!(late_rx.try_recv(), Ok(Some(Err(CdpError::NoResponse)))),
+            "late initiator after failed first attach must not hang"
+        );
+    }
+
+    #[test]
+    fn stealth_mode_still_initializes_network_when_cache_is_disabled() {
+        let mut t = page_target();
+        t.config.stealth_mode = true;
+        t.config.cache_enabled = false;
+        t.init_state = TargetInit::InitializingFrame(FrameManager::init_commands(
+            t.config.request_timeout,
+            t.config.stealth_mode,
+        ));
+        let mut methods = Vec::new();
+        while let Some(TargetEvent::Request(req)) = poll(&mut t) {
+            methods.push(req.method.to_string());
+            t.on_response(reply(None), &req.method);
+        }
+        assert!(
+            methods.contains(&"Network.setCacheDisabled".to_string()),
+            "disable_cache must be applied in stealth mode: {methods:?}"
+        );
     }
 
     #[test]

@@ -217,8 +217,7 @@ impl Handler {
                                 // initialized
                                 target.set_initiator(tx);
                             } else {
-                                // TODO can this even happen?
-                                panic!("Created target not present")
+                                let _ = tx.send(Err(CdpError::NotFound)).ok();
                             }
                         }
                         Err(err) => {
@@ -461,18 +460,21 @@ impl Handler {
                         return;
                     }
                     // A target's automatic attachment reports its children on its own session.
+                    let parent_session = SessionId::from(session_id.clone());
                     let child = match &event.params {
                         CdpEvent::TargetAttachedToTarget(ev)
                             if ev.target_info.r#type == "iframe" =>
                         {
-                            Some(Ok((**ev).clone()))
+                            Some(Ok((parent_session, (**ev).clone())))
                         }
                         CdpEvent::TargetDetachedFromTarget(ev) => Some(Err(ev.session_id.clone())),
                         _ => None,
                     };
                     target.on_event(event);
                     match child {
-                        Some(Ok(attached)) => self.on_child_attached(attached),
+                        Some(Ok((parent_session, attached))) => {
+                            self.on_child_attached(parent_session, attached)
+                        }
                         Some(Err(detached)) => self.on_child_detached(&detached),
                         None => {}
                     }
@@ -649,7 +651,7 @@ impl Handler {
     /// a handle on its own session.
     ///
     /// Not in stealth mode: there a child is left as before, with no domain enabled.
-    fn on_child_attached(&mut self, event: EventAttachedToTarget) {
+    fn on_child_attached(&mut self, parent_session: SessionId, event: EventAttachedToTarget) {
         // Stealth keeps the old behaviour: no domain is enabled on a child. The out-of-process
         // frames are exactly where captcha and anti-bot scripts run, and `Runtime.enable` there
         // is the fingerprint stealth exists to avoid (review F1). Stealth also attaches children
@@ -665,8 +667,8 @@ impl Handler {
             if existing.is_child() && existing.session_id() == Some(&event.session_id) {
                 return;
             }
-            if let Some(old) = existing.session_id().cloned() {
-                self.sessions.remove(&old);
+            if let Some(removed) = self.targets.remove(&target_id) {
+                self.cleanup_removed_target(removed);
             }
         }
         let browser_ctx = event
@@ -698,8 +700,33 @@ impl Handler {
         self.targets.insert(target_id.clone(), target);
         self.sessions.insert(
             event.session_id.clone(),
-            Session::new(event.session_id, target_id),
+            Session::new_child(event.session_id, target_id, parent_session),
         );
+    }
+
+    /// Clean up a removed target's session, any in-flight navigations waiting on its frame
+    /// manager, and any nested child sessions/targets auto-attached under its session.
+    fn cleanup_removed_target(&mut self, mut target: Target) {
+        for nav_id in target.frame_manager_mut().drain_navigation_ids() {
+            if let Some(NavigationRequest::Navigate(nav)) = self.navigations.remove(&nav_id) {
+                let _ = nav
+                    .tx
+                    .send(Err(crate::error::ChannelError::PageClosed.into()));
+            }
+        }
+        let Some(session_id) = target.session_id().cloned() else {
+            return;
+        };
+        self.sessions.remove(&session_id);
+        let child_sessions: Vec<SessionId> = self
+            .sessions
+            .values()
+            .filter(|s| s.parent_session() == Some(&session_id))
+            .map(|s| s.session_id().clone())
+            .collect();
+        for child_session in child_sessions {
+            self.on_child_detached(&child_session);
+        }
     }
 
     /// A session was detached, reported on its parent's session. If it is an auto-attached
@@ -717,8 +744,11 @@ impl Handler {
                     .is_some_and(|t| t.is_child() && t.session_id() == Some(session_id))
             });
         if let Some(target_id) = child {
-            self.sessions.remove(session_id);
-            self.targets.remove(&target_id);
+            if let Some(target) = self.targets.remove(&target_id) {
+                self.cleanup_removed_target(target);
+            } else {
+                self.sessions.remove(session_id);
+            }
         }
     }
 
@@ -764,10 +794,7 @@ impl Handler {
     /// Fired when the target was destroyed in the browser
     fn on_target_destroyed(&mut self, event: EventTargetDestroyed) {
         if let Some(target) = self.targets.remove(&event.target_id) {
-            // TODO shutdown?
-            if let Some(session) = target.session_id() {
-                self.sessions.remove(session);
-            }
+            self.cleanup_removed_target(target);
         }
     }
 
