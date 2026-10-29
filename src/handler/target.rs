@@ -1610,10 +1610,10 @@ mod init_error_tests {
             Some(TargetEvent::Request(req)) => {
                 assert_eq!(req.method, "Target.closeTarget");
                 // On the browser session: the page session may be what failed.
-                assert!(req.session_id.is_none(), "{req:?}");
+                assert!(req.session_id.is_none(), "expected the browser session");
                 assert_eq!(req.params["targetId"], "T1");
             }
-            other => panic!("expected the target to be closed, got {other:?}"),
+            _ => panic!("expected the target to be closed"),
         }
         assert!(matches!(t.init_state, TargetInit::Closing));
         match rx.try_recv() {
@@ -1670,7 +1670,7 @@ mod init_error_tests {
                 assert_eq!(req.method, CloseTargetParams::IDENTIFIER);
                 assert!(req.session_id.is_none());
             }
-            other => panic!("expected the target to be closed, got {other:?}"),
+            _ => panic!("expected the target to be closed"),
         }
     }
 
@@ -2023,11 +2023,11 @@ mod session_recovery_tests {
         t.on_response(err_reply(), "Page.enable");
         match cx_poll(&mut t) {
             Some(TargetEvent::Request(req) | TargetEvent::Attach(req, _)) => {
-                assert_eq!(req.method, "Target.detachFromTarget", "{req:?}");
-                assert!(req.session_id.is_none(), "on the browser session: {req:?}");
+                assert_eq!(req.method, "Target.detachFromTarget");
+                assert!(req.session_id.is_none(), "on the browser session");
                 assert_eq!(req.params["sessionId"], "S2");
             }
-            other => panic!("the failed session must be ended, got {other:?}"),
+            _ => panic!("the failed session must be ended"),
         }
     }
 
@@ -2118,15 +2118,15 @@ mod session_recovery_tests {
         // attach), within the budget.
         match cx_poll(&mut t) {
             Some(TargetEvent::Request(req) | TargetEvent::Attach(req, _)) => {
-                assert_eq!(req.method, "Target.detachFromTarget", "{req:?}")
+                assert_eq!(req.method, "Target.detachFromTarget")
             }
-            other => panic!("expected the failed session to be ended, got {other:?}"),
+            _ => panic!("expected the failed session to be ended"),
         }
         match cx_poll(&mut t) {
             Some(TargetEvent::Request(req) | TargetEvent::Attach(req, _)) => {
-                assert_eq!(req.method, AttachToTargetParams::IDENTIFIER, "{req:?}")
+                assert_eq!(req.method, AttachToTargetParams::IDENTIFIER)
             }
-            other => panic!("expected a retry attach, got {other:?}"),
+            _ => panic!("expected a retry attach"),
         }
         assert!(!matches!(t.init_state, TargetInit::Closing));
     }
@@ -2204,13 +2204,13 @@ mod session_recovery_tests {
             Some(TargetEvent::Request(req) | TargetEvent::Attach(req, _)) => {
                 assert_eq!(req.method, "Target.detachFromTarget")
             }
-            other => panic!("expected the cleanup detach, got {other:?}"),
+            _ => panic!("expected the cleanup detach"),
         }
         match cx_poll(&mut t) {
             Some(TargetEvent::Request(req) | TargetEvent::Attach(req, _)) => {
                 assert_eq!(req.method, AttachToTargetParams::IDENTIFIER)
             }
-            other => panic!("expected the retry attach, got {other:?}"),
+            _ => panic!("expected the retry attach"),
         }
         t.set_session_id(SessionId::from("S3".to_string()));
         t.on_response(err_reply(), "Target.detachFromTarget");
@@ -2265,7 +2265,7 @@ mod session_recovery_tests {
         t.on_response(err_reply(), AttachToTargetParams::IDENTIFIER);
         match cx_poll(&mut t) {
             None => {}
-            other => panic!("nothing may be sent — above all no closeTarget: {other:?}"),
+            _ => panic!("nothing may be sent — above all no closeTarget"),
         }
         assert!(!matches!(t.init_state, TargetInit::Closing));
     }
@@ -2280,7 +2280,7 @@ mod session_recovery_tests {
             Some(TargetEvent::Request(req) | TargetEvent::Attach(req, _)) => {
                 assert_eq!(req.method, AttachToTargetParams::IDENTIFIER)
             }
-            other => panic!("expected the recovery attach, got {other:?}"),
+            _ => panic!("expected the recovery attach"),
         }
         {
             let a = t.attach_attempt();
@@ -2288,9 +2288,9 @@ mod session_recovery_tests {
         }
         match cx_poll(&mut t) {
             Some(TargetEvent::Request(req) | TargetEvent::Attach(req, _)) => {
-                assert_eq!(req.method, AttachToTargetParams::IDENTIFIER, "{req:?}")
+                assert_eq!(req.method, AttachToTargetParams::IDENTIFIER)
             }
-            other => panic!("expected a retry attach, got {other:?}"),
+            _ => panic!("expected a retry attach"),
         }
         // And once the budget is spent, a waiting reattach_target hears.
         let (tx, mut rx) = futures::channel::oneshot::channel();
@@ -2428,7 +2428,7 @@ mod session_recovery_tests {
                     assert_eq!(attempt, expected);
                     assert_eq!(attempt, t.attach_attempt());
                 }
-                other => panic!("expected an attach carrying its attempt, got {other:?}"),
+                _ => panic!("expected an attach carrying its attempt"),
             }
             drive(&mut t, "S1");
         }
