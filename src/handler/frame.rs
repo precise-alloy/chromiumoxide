@@ -471,15 +471,17 @@ impl FrameManager {
             }
         } else {
             let mut f = if let Some(main) = self.main_frame.take() {
-                // update main frame
-                let mut main_frame = self.frames.remove(&main).expect("Main frame is tracked.");
-                for child in &main_frame.child_frames {
-                    self.remove_frames_recursively(child);
+                if let Some(mut main_frame) = self.frames.remove(&main) {
+                    for child in &main_frame.child_frames {
+                        self.remove_frames_recursively(child);
+                    }
+                    // this is necessary since we can't borrow mut and then remove recursively
+                    main_frame.child_frames.clear();
+                    main_frame.id = frame.id.clone();
+                    main_frame
+                } else {
+                    Frame::new(frame.id.clone())
                 }
-                // this is necessary since we can't borrow mut and then remove recursively
-                main_frame.child_frames.clear();
-                main_frame.id = frame.id.clone();
-                main_frame
             } else {
                 // initial main frame navigation
                 Frame::new(frame.id.clone())

@@ -128,16 +128,19 @@ impl Browser {
                 .await
             {
                 Ok(req) => {
-                    let socketaddr = req.remote_addr().unwrap();
+                    let socketaddr = req.remote_addr();
                     let connection: BrowserConnection =
                         serde_json::from_slice(&req.bytes().await.unwrap_or_default())
                             .unwrap_or_default();
 
                     if !connection.web_socket_debugger_url.is_empty() {
-                        // prevent proxy interfaces from returning local ips to connect to the exact machine
-                        debug_ws_url = connection
-                            .web_socket_debugger_url
-                            .replace("127.0.0.1", &socketaddr.ip().to_string());
+                        debug_ws_url = match socketaddr {
+                            // prevent proxy interfaces from returning local ips to connect to the exact machine
+                            Some(addr) => connection
+                                .web_socket_debugger_url
+                                .replace("127.0.0.1", &addr.ip().to_string()),
+                            None => connection.web_socket_debugger_url,
+                        };
                     }
                 }
                 Err(_) => return Err(CdpError::NoResponse),
@@ -201,8 +204,8 @@ impl Browser {
                     // already exited, do nothing, may happen if the browser crashed
                 } else {
                     // the process is still alive, kill it and wait for exit (avoid zombie processes)
-                    child.kill().await.expect("`Browser::launch` failed but could not clean-up the child process (`kill`)");
-                    child.wait().await.expect("`Browser::launch` failed but could not clean-up the child process (`wait`)");
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
                 }
                 return Err(e);
             }
@@ -594,7 +597,12 @@ async fn ws_url_from_output(
 ) -> Result<String> {
     use futures::{AsyncBufReadExt, FutureExt};
     let mut timeout_fut = timeout_fut.fuse();
-    let stderr = child_process.stderr.take().expect("no stderror");
+    let stderr = child_process.stderr.take().ok_or_else(|| {
+        CdpError::LaunchIo(
+            io::Error::new(io::ErrorKind::BrokenPipe, "missing browser stderr"),
+            BrowserStderr::new(Vec::new()),
+        )
+    })?;
     let mut stderr_bytes = Vec::<u8>::new();
     let mut exit_status_fut = Box::pin(child_process.wait()).fuse();
     let mut buf = futures::io::BufReader::new(stderr);
@@ -617,17 +625,16 @@ async fn ws_url_from_output(
                         }
                         let start_offset = stderr_bytes.len() - byte_count;
                         let new_bytes = &stderr_bytes[start_offset..];
-                        match std::str::from_utf8(new_bytes) {
-                            Err(_) => {
-                                let e = io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8");
-                                return Err(CdpError::LaunchIo(e, BrowserStderr::new(stderr_bytes)));
-                            }
-                            Ok(line) => {
-                                if let Some((_, ws)) = line.rsplit_once("listening on ") {
-                                    if ws.starts_with("ws") && ws.contains("devtools/browser") {
-                                        return Ok(ws.trim().to_string());
-                                    }
-                                }
+                        let line = String::from_utf8_lossy(new_bytes);
+                        if let Some((_, ws)) = line.rsplit_once("listening on ") {
+                            if ws.starts_with("ws") && ws.contains("devtools/browser") {
+                                let ws_url = ws.trim().to_string();
+                                // Keep draining stderr in the background so Chrome never hits EPIPE
+                                // or blocks on a full OS pipe buffer during long runs.
+                                tokio::spawn(async move {
+                                    let _ = futures::io::copy(buf, &mut futures::io::sink()).await;
+                                });
+                                return Ok(ws_url);
                             }
                         }
                     }

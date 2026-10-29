@@ -64,7 +64,14 @@ pub enum CdpError {
     JavascriptException(Box<ExceptionDetails>),
     #[error("{0}")]
     Url(#[from] url::ParseError),
-    #[error("{1}")]
+    // Size and parser position only: serde's error display can quote rejected payload values.
+    #[error(
+        "Received invalid ws message ({} bytes, {:?} at line {}, column {})",
+        .0.len(),
+        .1.classify(),
+        .1.line(),
+        .1.column()
+    )]
     InvalidMessage(String, serde_json::Error),
 }
 impl CdpError {
@@ -192,5 +199,15 @@ mod tests {
             assert!(!shown.contains(sentinel), "payload leaked: {shown}");
             assert!(shown.contains("26 bytes"), "size missing: {shown}");
         }
+    }
+
+    #[test]
+    fn invalid_ws_message_display_carries_no_payload() {
+        let sentinel = "secret-cookie-token-9912";
+        let raw = format!("\"{sentinel}\" trailing");
+        let err = serde_json::from_str::<serde_json::Value>(&raw).unwrap_err();
+        let shown = CdpError::InvalidMessage(raw, err).to_string();
+        assert!(!shown.contains(sentinel), "payload leaked: {shown}");
+        assert!(shown.contains("bytes"), "size missing: {shown}");
     }
 }

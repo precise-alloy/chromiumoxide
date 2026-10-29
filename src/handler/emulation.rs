@@ -42,7 +42,11 @@ impl EmulationManager {
             .build()
             .unwrap();
 
-        let set_touch = SetTouchEmulationEnabledParams::new(viewport.has_touch);
+        let mut set_touch = SetTouchEmulationEnabledParams::builder().enabled(viewport.has_touch);
+        if viewport.has_touch {
+            set_touch = set_touch.max_touch_points(5);
+        }
+        let set_touch = set_touch.build().unwrap();
 
         let chain = CommandChain::new(
             vec![

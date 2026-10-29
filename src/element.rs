@@ -256,7 +256,11 @@ impl Element {
             .await?;
 
         if resp.result.r#type == RemoteObjectType::String {
-            let error_text = resp.result.value.unwrap().as_str().unwrap().to_string();
+            let error_text = resp
+                .result
+                .value
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| "Cannot scroll element into view".to_string());
             return Err(CdpError::ScrollingFailed(error_text));
         }
         Ok(self)
