@@ -351,8 +351,8 @@ impl Element {
     /// Returns the value of the element's attribute
     pub async fn attribute(&self, attribute: impl AsRef<str>) -> Result<Option<String>> {
         let js_fn = format!(
-            "function() {{ return this.getAttribute('{}'); }}",
-            attribute.as_ref()
+            "function() {{ return this.getAttribute({}); }}",
+            serde_json::to_string(attribute.as_ref())?
         );
         let resp = self.call_js_fn(js_fn, false).await?;
         if let Some(value) = resp.result.value {
@@ -408,7 +408,10 @@ impl Element {
     ///
     /// See also `Element::inner_html`.
     pub async fn property(&self, property: impl AsRef<str>) -> Result<Option<serde_json::Value>> {
-        let js_fn = format!("function() {{ return this.{}; }}", property.as_ref());
+        let js_fn = format!(
+            "function() {{ return this[{}]; }}",
+            serde_json::to_string(property.as_ref())?
+        );
         let resp = self.call_js_fn(js_fn, false).await?;
         Ok(resp.result.value)
     }
@@ -438,8 +441,8 @@ impl Element {
         bounding_box.y += viewport.page_y as f64;
 
         let clip = Viewport {
-            x: viewport.page_x as f64 + bounding_box.x,
-            y: viewport.page_y as f64 + bounding_box.y,
+            x: bounding_box.x,
+            y: bounding_box.y,
             width: bounding_box.width,
             height: bounding_box.height,
             scale: 1.,

@@ -62,7 +62,7 @@ pub(crate) mod base64 {
 pub fn evaluation_string(function: impl AsRef<str>, params: &[impl AsRef<str>]) -> String {
     let params = params
         .iter()
-        .map(|s| format!("\"{}\"", s.as_ref()))
+        .map(|s| serde_json::to_string(s.as_ref()).expect("valid string literal"))
         .collect::<Vec<_>>()
         .join(",");
     format!("({})({params})", function.as_ref())
@@ -80,7 +80,8 @@ pub fn is_likely_js_function(function: impl AsRef<str>) -> bool {
         offset = "async ".len() - 1
     }
 
-    if fun[offset..].trim_start().starts_with("function ") {
+    let after_async = fun[offset..].trim_start();
+    if after_async.starts_with("function ") || after_async.starts_with("function(") {
         return true;
     } else if skip_args(&mut fun) {
         // attempt to detect arrow functions by stripping the leading arguments and
@@ -126,10 +127,18 @@ mod tests {
     #[test]
     fn is_js_function() {
         assert!(is_likely_js_function("function abc() {}"));
+        assert!(is_likely_js_function("function() {}"));
         assert!(is_likely_js_function("async function abc() {}"));
+        assert!(is_likely_js_function("async function() {}"));
         assert!(is_likely_js_function("() => {}"));
         assert!(is_likely_js_function("(abc, def) => {}"));
         assert!(is_likely_js_function("((abc), (def)) => {}"));
         assert!(is_likely_js_function("() => Promise.resolve(100 / 25)"));
+    }
+
+    #[test]
+    fn evaluation_string_escapes_special_characters() {
+        let expr = evaluation_string("fn", &["a\"b\\c\nd"]);
+        assert_eq!(expr, r#"(fn)("a\"b\\c\nd")"#);
     }
 }
