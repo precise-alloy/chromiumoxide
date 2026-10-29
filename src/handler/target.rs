@@ -682,8 +682,12 @@ impl Target {
             .as_ref()
             .is_some_and(|p| p.inner().session_id() == &session);
         if !session_matches {
-            let handle =
-                PageHandle::new(self.target_id().clone(), session, self.opener_id().cloned());
+            let handle = PageHandle::new(
+                self.target_id().clone(),
+                session,
+                self.opener_id().cloned(),
+                self.config.request_timeout,
+            );
             self.page = Some(handle);
         }
     }
