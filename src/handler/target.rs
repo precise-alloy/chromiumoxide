@@ -690,8 +690,8 @@ impl Target {
 
     /// Tries to create the `PageInner` if this target is already initialized
     pub(crate) fn get_or_create_page(&mut self) -> Option<&Arc<PageInner>> {
-        if self.child && matches!(self.init_state, TargetInit::Closing) {
-            // A child whose initialisation failed gives no new handle: `Browser::get_page` ends
+        if matches!(self.init_state, TargetInit::Closing) {
+            // A target whose initialisation failed gives no new handle: `Browser::get_page` ends
             // with `NotFound` (review F5).
             return None;
         }
@@ -942,6 +942,7 @@ impl Target {
         if let Some(initiator) = self.initiator.take() {
             let _ = initiator.send(Err(error));
         }
+        self.clear_page();
         self.init_state = TargetInit::Closing;
         if self.child {
             // A frame is not this crate's to close: `Target.closeTarget` names a tab, and a peer
@@ -1627,6 +1628,10 @@ mod init_error_tests {
             _ => panic!("expected the target to be closed"),
         }
         assert!(matches!(t.init_state, TargetInit::Closing));
+        assert!(
+            t.get_or_create_page().is_none(),
+            "a page target in Closing must not expose a Page handle"
+        );
         match rx.try_recv() {
             Ok(Some(Err(CdpError::Chrome(e)))) => {
                 assert_eq!(e.message, "Session with given id not found.")

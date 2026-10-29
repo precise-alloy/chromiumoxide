@@ -656,7 +656,7 @@ impl Handler {
         // frames are exactly where captcha and anti-bot scripts run, and `Runtime.enable` there
         // is the fingerprint stealth exists to avoid (review F1). Stealth also attaches children
         // without pausing them (`waitForDebuggerOnStart: false`), so none waits to be resumed.
-        if self.config.stealth_mode {
+        if self.config.stealth_mode || !self.config.initialize_child_targets {
             return;
         }
         let target_id = event.target_info.target_id.clone();
@@ -1144,6 +1144,9 @@ pub struct HandlerConfig {
     /// end of what it lent — WinClaw's CDP relay serves one lent tab, and a session it ended must
     /// see nothing more (winclaw#2202).
     pub session_recovery: bool,
+    /// Whether auto-attached child `iframe` targets are tracked and initialized with their own
+    /// CDP domains (`Page`, `Runtime`, `Network`, `Performance`, `Log`).
+    pub initialize_child_targets: bool,
 }
 
 impl Default for HandlerConfig {
@@ -1158,6 +1161,7 @@ impl Default for HandlerConfig {
             cache_enabled: true,
             stealth_mode: false,
             session_recovery: true,
+            initialize_child_targets: true,
         }
     }
 }

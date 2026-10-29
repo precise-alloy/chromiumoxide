@@ -223,6 +223,7 @@ impl Browser {
             cache_enabled: config.cache_enabled,
             stealth_mode: config.hidden,
             session_recovery: config.session_recovery,
+            initialize_child_targets: config.initialize_child_targets,
         };
 
         let fut = Handler::new(conn, rx, handler_config);

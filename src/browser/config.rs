@@ -100,6 +100,10 @@ pub struct BrowserConfig {
 
     /// Whether a page that loses its session automatically re-attaches in place.
     pub session_recovery: bool,
+
+    /// Whether auto-attached child `iframe` targets are tracked and initialized with their own
+    /// CDP domains (`Page`, `Runtime`, `Network`, `Performance`, `Log`).
+    pub initialize_child_targets: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +130,7 @@ pub struct BrowserConfigBuilder {
     cache_enabled: bool,
     hidden: bool,
     session_recovery: bool,
+    initialize_child_targets: bool,
 }
 
 impl BrowserConfig {
@@ -163,6 +168,7 @@ impl Default for BrowserConfigBuilder {
             cache_enabled: true,
             hidden: false,
             session_recovery: true,
+            initialize_child_targets: true,
         }
     }
 }
@@ -349,6 +355,16 @@ impl BrowserConfigBuilder {
         self
     }
 
+    pub fn initialize_child_targets(mut self, enabled: bool) -> Self {
+        self.initialize_child_targets = enabled;
+        self
+    }
+
+    pub fn disable_child_target_init(mut self) -> Self {
+        self.initialize_child_targets = false;
+        self
+    }
+
     pub fn build(self) -> std::result::Result<BrowserConfig, String> {
         let executable = if let Some(e) = self.executable {
             e
@@ -378,6 +394,7 @@ impl BrowserConfigBuilder {
             cache_enabled: self.cache_enabled,
             hidden: self.hidden,
             session_recovery: self.session_recovery,
+            initialize_child_targets: self.initialize_child_targets,
         })
     }
 }
