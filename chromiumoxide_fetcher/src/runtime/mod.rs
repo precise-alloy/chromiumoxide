@@ -3,10 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
-
-use self::zip::ZipArchive;
-
-mod zip;
+use zip::ZipArchive;
 
 #[derive(Debug, Default)]
 pub struct Runtime;
@@ -66,7 +63,7 @@ impl Runtime {
             anyhow::bail!("Invalid archive url");
         }
         while let Some(chunk) = res.chunk().await.context("Failed to read response chunk")? {
-            file.write(&chunk)
+            file.write_all(&chunk)
                 .await
                 .context("Failed to write to archive file")?;
         }
@@ -96,4 +93,41 @@ fn do_unzip(archive_path: &Path, folder_path: &Path) -> anyhow::Result<()> {
     // Clean (if possible)
     let _ = fs::remove_file(archive_path);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn do_unzip_extracts_archive_entries_and_removes_zip() {
+        let dir = std::env::temp_dir().join(format!(
+            "chromiumoxide-fetcher-unzip-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive_path = dir.join("test.zip");
+        let unpack_dir = dir.join("unpacked");
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file(
+                    "chrome-win/chrome.exe",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(b"chromium-binary").unwrap();
+            writer.finish().unwrap();
+        }
+        do_unzip(&archive_path, &unpack_dir).unwrap();
+        assert!(!archive_path.exists());
+        assert_eq!(
+            std::fs::read(unpack_dir.join("chrome-win/chrome.exe")).unwrap(),
+            b"chromium-binary"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

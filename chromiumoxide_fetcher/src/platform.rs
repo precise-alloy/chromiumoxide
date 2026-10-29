@@ -82,13 +82,7 @@ fn is_windows_11() -> bool {
     // this workaround tries to disambiguate that by checking
     // if the dwBuildNumber is from Windows 11 releases (>= 22000).
     let version = windows_version::OsVersion::current();
-    if version.major > 10 {
-        true
-    } else if version.major == 10 && version.build >= 22000 {
-        true
-    } else {
-        false
-    }
+    version.major > 10 || (version.major == 10 && version.build >= 22000)
 }
 
 #[cfg(not(target_os = "windows"))]

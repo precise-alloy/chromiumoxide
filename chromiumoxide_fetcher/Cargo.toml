@@ -3,7 +3,7 @@ name = "chromiumoxide_fetcher"
 version = "0.9.1"
 authors = ["Matthias Seitz <matthias.seitz@outlook.de>"]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Contains a chromium fetcher"
 homepage = "https://github.com/mattsse/chromiumoxide"
@@ -31,12 +31,7 @@ anyhow = "1"
 directories = "6"
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
-zip0 = { package = "zip", version = "0.6", default-features = false, features = [
-  "deflate",
-], optional = true }
-zip8 = { package = "zip", version = "8", default-features = false, features = [
-  "deflate-flate2-zlib-rs",
-], optional = true }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["fs", "io-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 
@@ -44,7 +39,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json"] }
 windows-version = "0.1"
 
 [features]
-default = ["rustls", "zip8"]
+default = ["rustls"]
 
 rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
