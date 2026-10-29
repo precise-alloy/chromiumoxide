@@ -376,11 +376,11 @@ impl Target {
             self.begin_reattach(Instant::now(), true);
             return true;
         }
-        if self.is_initialized() {
-            if let Some(waiter) = self.reattach_waiter.take() {
-                let page = self.get_or_create_page().map(|p| p.clone().into());
-                let _ = waiter.send(page.ok_or(CdpError::NotFound));
-            }
+        if self.is_initialized()
+            && let Some(waiter) = self.reattach_waiter.take()
+        {
+            let page = self.get_or_create_page().map(|p| p.clone().into());
+            let _ = waiter.send(page.ok_or(CdpError::NotFound));
         }
         false
     }
@@ -1052,13 +1052,12 @@ impl Target {
                         None => {
                             // Stealth: skip createIsolatedWorld — it's a debugger-only
                             // artifact that reCAPTCHA can detect
-                            if !self.config.stealth_mode {
-                                if let Some(isolated_world_cmds) =
+                            if !self.config.stealth_mode
+                                && let Some(isolated_world_cmds) =
                                     self.frame_manager.ensure_isolated_world(UTILITY_WORLD_NAME)
-                                {
-                                    *cmds = isolated_world_cmds;
-                                    return self.poll(cx, now);
-                                }
+                            {
+                                *cmds = isolated_world_cmds;
+                                return self.poll(cx, now);
                             }
                             // Stealth: skip Network.enable unless request_intercept or cache disable is needed
                             if self.config.stealth_mode
@@ -1152,15 +1151,16 @@ impl Target {
                 // Not while an intentional detach is pending: this session is
                 // about to end, and the waiter is answered by its replacement
                 // (codex R8).
-                if self.session_id.is_some() && !self.detach_pending {
-                    if let Some(waiter) = self.reattach_waiter.take() {
-                        match self.get_or_create_page() {
-                            Some(page) => {
-                                let _ = waiter.send(Ok(page.clone().into()));
-                            }
-                            None => {
-                                let _ = waiter.send(Err(CdpError::NotFound));
-                            }
+                if self.session_id.is_some()
+                    && !self.detach_pending
+                    && let Some(waiter) = self.reattach_waiter.take()
+                {
+                    match self.get_or_create_page() {
+                        Some(page) => {
+                            let _ = waiter.send(Ok(page.clone().into()));
+                        }
+                        None => {
+                            let _ = waiter.send(Err(CdpError::NotFound));
                         }
                     }
                 }
@@ -1190,11 +1190,11 @@ impl Target {
             TargetInit::Closing => return None,
         };
         loop {
-            if let Some(frame) = self.frame_manager.main_frame() {
-                if frame.is_loaded() {
-                    while let Some(tx) = self.wait_for_frame_navigation.pop() {
-                        let _ = tx.send(frame.http_request().cloned());
-                    }
+            if let Some(frame) = self.frame_manager.main_frame()
+                && frame.is_loaded()
+            {
+                while let Some(tx) = self.wait_for_frame_navigation.pop() {
+                    let _ = tx.send(frame.http_request().cloned());
                 }
             }
 
@@ -2013,11 +2013,11 @@ mod session_recovery_tests {
             // Answer each retry's attach with a session, then fail it.
             let mut attached = false;
             while let Some(ev) = cx_poll(&mut t) {
-                if let TargetEvent::Request(req) | TargetEvent::Attach(req, _) = ev {
-                    if req.method == AttachToTargetParams::IDENTIFIER {
-                        attached = true;
-                        break;
-                    }
+                if let TargetEvent::Request(req) | TargetEvent::Attach(req, _) = ev
+                    && req.method == AttachToTargetParams::IDENTIFIER
+                {
+                    attached = true;
+                    break;
                 }
             }
             if !attached {
@@ -2446,11 +2446,11 @@ mod session_recovery_tests {
         t.on_session_lost(Instant::now());
         assert!(t.expects_session(), "re-attaching");
         for _ in 0..(RECOVERY_BUDGET + 2) {
-            if let Some(TargetEvent::Request(req) | TargetEvent::Attach(req, _)) = cx_poll(&mut t) {
-                if req.method == AttachToTargetParams::IDENTIFIER {
-                    let a = t.attach_attempt();
-                    t.on_attach_timed_out(a);
-                }
+            if let Some(TargetEvent::Request(req) | TargetEvent::Attach(req, _)) = cx_poll(&mut t)
+                && req.method == AttachToTargetParams::IDENTIFIER
+            {
+                let a = t.attach_attempt();
+                t.on_attach_timed_out(a);
             }
         }
         assert!(t.session_id().is_none());

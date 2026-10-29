@@ -344,10 +344,10 @@ impl FrameManager {
 
     /// Track the request in the frame
     pub fn on_http_request_finished(&mut self, request: HttpRequest) {
-        if let Some(id) = request.frame.as_ref() {
-            if let Some(frame) = self.frames.get_mut(id) {
-                frame.set_request(request);
-            }
+        if let Some(id) = request.frame.as_ref()
+            && let Some(frame) = self.frames.get_mut(id)
+        {
+            frame.set_request(request);
         }
     }
 
@@ -446,11 +446,11 @@ impl FrameManager {
         if self.frames.contains_key(&frame_id) {
             return;
         }
-        if let Some(parent_frame_id) = parent_frame_id {
-            if let Some(parent_frame) = self.frames.get_mut(&parent_frame_id) {
-                let frame = Frame::with_parent(frame_id.clone(), parent_frame);
-                self.frames.insert(frame_id, frame);
-            }
+        if let Some(parent_frame_id) = parent_frame_id
+            && let Some(parent_frame) = self.frames.get_mut(&parent_frame_id)
+        {
+            let frame = Frame::with_parent(frame_id.clone(), parent_frame);
+            self.frames.insert(frame_id, frame);
         }
     }
 
@@ -524,28 +524,27 @@ impl FrameManager {
             .aux_data
             .as_ref()
             .and_then(|v| v["frameId"].as_str())
+            && let Some(frame) = self.frames.get_mut(frame_id)
         {
-            if let Some(frame) = self.frames.get_mut(frame_id) {
-                if event
-                    .context
-                    .aux_data
-                    .as_ref()
-                    .and_then(|v| v["isDefault"].as_bool())
-                    .unwrap_or_default()
-                {
-                    frame
-                        .main_world
-                        .set_context(event.context.id, event.context.unique_id.clone());
-                } else if event.context.name == UTILITY_WORLD_NAME
-                    && frame.secondary_world.execution_context().is_none()
-                {
-                    frame
-                        .secondary_world
-                        .set_context(event.context.id, event.context.unique_id.clone());
-                }
-                self.context_ids
-                    .insert(event.context.unique_id.clone(), frame.id.clone());
+            if event
+                .context
+                .aux_data
+                .as_ref()
+                .and_then(|v| v["isDefault"].as_bool())
+                .unwrap_or_default()
+            {
+                frame
+                    .main_world
+                    .set_context(event.context.id, event.context.unique_id.clone());
+            } else if event.context.name == UTILITY_WORLD_NAME
+                && frame.secondary_world.execution_context().is_none()
+            {
+                frame
+                    .secondary_world
+                    .set_context(event.context.id, event.context.unique_id.clone());
             }
+            self.context_ids
+                .insert(event.context.unique_id.clone(), frame.id.clone());
         }
         if event
             .context
@@ -560,10 +559,10 @@ impl FrameManager {
 
     /// Issued when execution context is destroyed
     pub fn on_frame_execution_context_destroyed(&mut self, event: &EventExecutionContextDestroyed) {
-        if let Some(id) = self.context_ids.remove(&event.execution_context_unique_id) {
-            if let Some(frame) = self.frames.get_mut(&id) {
-                frame.destroy_context(&event.execution_context_unique_id);
-            }
+        if let Some(id) = self.context_ids.remove(&event.execution_context_unique_id)
+            && let Some(frame) = self.frames.get_mut(&id)
+        {
+            frame.destroy_context(&event.execution_context_unique_id);
         }
     }
 
@@ -594,10 +593,10 @@ impl FrameManager {
             for child in &frame.child_frames {
                 self.remove_frames_recursively(child);
             }
-            if let Some(parent_id) = frame.parent_frame.take() {
-                if let Some(parent) = self.frames.get_mut(&parent_id) {
-                    parent.child_frames.remove(&frame.id);
-                }
+            if let Some(parent_id) = frame.parent_frame.take()
+                && let Some(parent) = self.frames.get_mut(&parent_id)
+            {
+                parent.child_frames.remove(&frame.id);
             }
             Some(frame)
         } else {
@@ -749,10 +748,10 @@ impl FrameNavigationRequest {
 
     /// This will set the id of the frame into the `params` `frameId` field.
     pub fn set_frame_id(&mut self, frame_id: FrameId) {
-        if let Some(params) = self.req.params.as_object_mut() {
-            if let Entry::Vacant(entry) = params.entry("frameId") {
-                entry.insert(serde_json::Value::String(frame_id.into()));
-            }
+        if let Some(params) = self.req.params.as_object_mut()
+            && let Entry::Vacant(entry) = params.entry("frameId")
+        {
+            entry.insert(serde_json::Value::String(frame_id.into()));
         }
     }
 }

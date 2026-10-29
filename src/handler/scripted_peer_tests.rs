@@ -348,10 +348,10 @@ async fn attach_with(
     let start = Instant::now();
     let page = loop {
         let pages = browser.pages().await.expect("pages");
-        if let [page] = pages.as_slice() {
-            if page.mainframe().await.ok().flatten().is_some() {
-                break page.clone();
-            }
+        if let [page] = pages.as_slice()
+            && page.mainframe().await.ok().flatten().is_some()
+        {
+            break page.clone();
         }
         assert!(start.elapsed() < PROMPT, "the page was not adopted");
         tokio::time::sleep(Duration::from_millis(10)).await;

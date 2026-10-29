@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(&download_path).await?;
     let fetcher = BrowserFetcher::new(
         BrowserFetcherOptions::builder()
-            .with_path(&download_path)
+            .with_path(download_path)
             .build()?,
     );
     let info = fetcher.fetch().await?;
@@ -24,17 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let handle = tokio::spawn(async move {
-        loop {
-            match handler.next().await {
-                Some(h) => match h {
-                    Ok(_) => continue,
-                    Err(_) => break,
-                },
-                None => break,
-            }
-        }
-    });
+    let handle = tokio::spawn(async move { while let Some(Ok(_)) = handler.next().await {} });
 
     let page = browser.new_page("about:blank").await?;
 

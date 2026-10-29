@@ -452,35 +452,32 @@ impl Handler {
 
     /// Process an incoming event read from the websocket
     fn on_event(&mut self, event: CdpEventMessage) {
-        if let Some(ref session_id) = event.session_id {
-            if let Some(session) = self.sessions.get(session_id.as_str()) {
-                if let Some(target) = self.targets.get_mut(session.target_id()) {
-                    if !target.accepts_event_from(session_id) {
-                        // A superseded session's late event (#1041, codex R7).
-                        return;
-                    }
-                    // A target's automatic attachment reports its children on its own session.
-                    let parent_session = SessionId::from(session_id.clone());
-                    let child = match &event.params {
-                        CdpEvent::TargetAttachedToTarget(ev)
-                            if ev.target_info.r#type == "iframe" =>
-                        {
-                            Some(Ok((parent_session, (**ev).clone())))
-                        }
-                        CdpEvent::TargetDetachedFromTarget(ev) => Some(Err(ev.session_id.clone())),
-                        _ => None,
-                    };
-                    target.on_event(event);
-                    match child {
-                        Some(Ok((parent_session, attached))) => {
-                            self.on_child_attached(parent_session, attached)
-                        }
-                        Some(Err(detached)) => self.on_child_detached(&detached),
-                        None => {}
-                    }
-                    return;
-                }
+        if let Some(ref session_id) = event.session_id
+            && let Some(session) = self.sessions.get(session_id.as_str())
+            && let Some(target) = self.targets.get_mut(session.target_id())
+        {
+            if !target.accepts_event_from(session_id) {
+                // A superseded session's late event (#1041, codex R7).
+                return;
             }
+            // A target's automatic attachment reports its children on its own session.
+            let parent_session = SessionId::from(session_id.clone());
+            let child = match &event.params {
+                CdpEvent::TargetAttachedToTarget(ev) if ev.target_info.r#type == "iframe" => {
+                    Some(Ok((parent_session, (**ev).clone())))
+                }
+                CdpEvent::TargetDetachedFromTarget(ev) => Some(Err(ev.session_id.clone())),
+                _ => None,
+            };
+            target.on_event(event);
+            match child {
+                Some(Ok((parent_session, attached))) => {
+                    self.on_child_attached(parent_session, attached)
+                }
+                Some(Err(detached)) => self.on_child_detached(&detached),
+                None => {}
+            }
+            return;
         }
         let CdpEventMessage { params, method, .. } = event;
         match params.clone() {
@@ -757,36 +754,36 @@ impl Handler {
     /// attached to it.
     fn on_detached_from_target(&mut self, event: EventDetachedFromTarget) {
         // remove the session
-        if let Some(session) = self.sessions.remove(&event.session_id) {
-            if let Some(target) = self.targets.get_mut(session.target_id()) {
-                // A single target can have multiple attached sessions
-                // simultaneously. Only the CURRENT session is cached
-                // on `target.session_id` / `target.page`; if the event
-                // is for an older/secondary session, leave the live
-                // session intact. Without this guard, detaching an
-                // older session would wipe the cached handle for the
-                // session that's still live, and the next `get_page`
-                // would spuriously return `CdpError::NotFound`.
-                let is_current = target.session_id() == Some(&event.session_id);
-                if is_current {
-                    // screen-play-rs#1041: the target decides what follows —
-                    // re-attach in place if it should stay attached, stay
-                    // detached if it was detached on purpose.
-                    target.on_session_lost(Instant::now());
-                    // Also drop the cached PageHandle so any caller
-                    // that races a `Target.attachToTarget` reply against
-                    // the matching `attachedToTarget` event window —
-                    // the handler drains `HandlerMessage` commands
-                    // (`GetPage`) before connection events in a single
-                    // poll tick, so it's reachable — receives a clean
-                    // `CdpError::NotFound` instead of a `PageHandle`
-                    // bound to the dead session (every command would
-                    // otherwise come back as `-32001: Session with
-                    // given id not found`). Callers treat `NotFound`
-                    // as a retryable signal until the next attached
-                    // event lands.
-                    target.clear_page();
-                }
+        if let Some(session) = self.sessions.remove(&event.session_id)
+            && let Some(target) = self.targets.get_mut(session.target_id())
+        {
+            // A single target can have multiple attached sessions
+            // simultaneously. Only the CURRENT session is cached
+            // on `target.session_id` / `target.page`; if the event
+            // is for an older/secondary session, leave the live
+            // session intact. Without this guard, detaching an
+            // older session would wipe the cached handle for the
+            // session that's still live, and the next `get_page`
+            // would spuriously return `CdpError::NotFound`.
+            let is_current = target.session_id() == Some(&event.session_id);
+            if is_current {
+                // screen-play-rs#1041: the target decides what follows —
+                // re-attach in place if it should stay attached, stay
+                // detached if it was detached on purpose.
+                target.on_session_lost(Instant::now());
+                // Also drop the cached PageHandle so any caller
+                // that races a `Target.attachToTarget` reply against
+                // the matching `attachedToTarget` event window —
+                // the handler drains `HandlerMessage` commands
+                // (`GetPage`) before connection events in a single
+                // poll tick, so it's reachable — receives a clean
+                // `CdpError::NotFound` instead of a `PageHandle`
+                // bound to the dead session (every command would
+                // otherwise come back as `-32001: Session with
+                // given id not found`). Callers treat `NotFound`
+                // as a retryable signal until the next attached
+                // event lands.
+                target.clear_page();
             }
         }
     }
@@ -899,10 +896,10 @@ impl Handler {
                         // time out on; tell the target, or it counts as
                         // attaching forever (screen-play-rs#1041, codex R3) —
                         // unless a newer attempt replaced it (codex R4).
-                        if let Some(target) = self.targets.get_mut(&target_id) {
-                            if target.on_attach_timed_out(attempt) {
-                                marked = true;
-                            }
+                        if let Some(target) = self.targets.get_mut(&target_id)
+                            && target.on_attach_timed_out(attempt)
+                        {
+                            marked = true;
                         }
                     }
                     PendingRequest::InternalCommand(..) => {}

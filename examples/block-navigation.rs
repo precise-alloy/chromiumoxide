@@ -161,23 +161,23 @@ async fn resolve(
     network_id: &network::RequestId,
     resolutions: &mut HashMap<network::RequestId, InterceptResolution>,
 ) {
-    if let Some(resolution) = resolutions.get(network_id) {
-        if let Some(request_id) = &resolution.request_id {
-            match resolution.action {
-                InterceptAction::Forward => {
-                    forward(page, request_id).await;
-                    resolutions.remove(network_id);
-                }
-                InterceptAction::Abort => {
-                    abort(page, request_id).await;
-                    resolutions.remove(network_id);
-                }
-                InterceptAction::Fullfill => {
-                    fullfill(page, request_id).await;
-                    resolutions.remove(network_id);
-                }
-                InterceptAction::None => (), // Processed pausd but not will be sent
+    if let Some(resolution) = resolutions.get(network_id)
+        && let Some(request_id) = &resolution.request_id
+    {
+        match resolution.action {
+            InterceptAction::Forward => {
+                forward(page, request_id).await;
+                resolutions.remove(network_id);
             }
+            InterceptAction::Abort => {
+                abort(page, request_id).await;
+                resolutions.remove(network_id);
+            }
+            InterceptAction::Fullfill => {
+                fullfill(page, request_id).await;
+                resolutions.remove(network_id);
+            }
+            InterceptAction::None => (), // Processed pausd but not will be sent
         }
     }
 }

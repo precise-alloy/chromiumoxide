@@ -94,14 +94,12 @@ async fn get_result(page: &Page, target_kind: &str) -> Option<DetectionRow> {
             .evaluate(script)
             .await
             .map(|v| v.into_value::<String>().ok())
+            && !js_value.trim().is_empty()
+            && js_value.starts_with('[')
+            && let Ok(list) = serde_json::from_str::<Vec<DetectionRow>>(&js_value)
+            && let Some(found) = list.into_iter().find(|p| p.kind == target_kind)
         {
-            if !js_value.trim().is_empty() && js_value.starts_with('[') {
-                if let Ok(list) = serde_json::from_str::<Vec<DetectionRow>>(&js_value) {
-                    if let Some(found) = list.into_iter().find(|p| p.kind == target_kind) {
-                        return Some(found);
-                    }
-                }
-            }
+            return Some(found);
         }
 
         if elapsed >= Duration::from_secs(timeout_secs) {

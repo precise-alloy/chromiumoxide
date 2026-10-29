@@ -292,12 +292,12 @@ impl NetworkManager {
         interception_id: Option<InterceptionId>,
     ) {
         let mut redirect_chain = Vec::new();
-        if let Some(redirect_resp) = event.redirect_response.as_ref() {
-            if let Some(mut request) = self.requests.remove(event.request_id.as_ref()) {
-                self.handle_request_redirect(&mut request, redirect_resp.clone());
-                redirect_chain = std::mem::take(&mut request.redirect_chain);
-                redirect_chain.push(request);
-            }
+        if let Some(redirect_resp) = event.redirect_response.as_ref()
+            && let Some(mut request) = self.requests.remove(event.request_id.as_ref())
+        {
+            self.handle_request_redirect(&mut request, redirect_resp.clone());
+            redirect_chain = std::mem::take(&mut request.redirect_chain);
+            redirect_chain.push(request);
         }
         let request = HttpRequest::new(
             event.request_id.clone(),

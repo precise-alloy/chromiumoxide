@@ -84,19 +84,20 @@ impl<T: EventMessage> Connection<T> {
     /// flush any processed message and start sending the next over the conn
     /// sink
     fn start_send_next(&mut self, cx: &mut Context<'_>) -> Result<()> {
-        if self.needs_flush {
-            if let Poll::Ready(Ok(())) = self.ws.poll_flush_unpin(cx) {
-                self.needs_flush = false;
-            }
+        if self.needs_flush
+            && let Poll::Ready(Ok(())) = self.ws.poll_flush_unpin(cx)
+        {
+            self.needs_flush = false;
         }
-        if self.pending_flush.is_none() && !self.needs_flush {
-            if let Some(cmd) = self.pending_commands.pop_front() {
-                // Method name and call id only: the params can carry page content and secrets.
-                tracing::trace!(method = %cmd.method, id = %cmd.id, "Sending");
-                let msg = serde_json::to_string(&cmd)?;
-                self.ws.start_send_unpin(msg.into())?;
-                self.pending_flush = Some(cmd);
-            }
+        if self.pending_flush.is_none()
+            && !self.needs_flush
+            && let Some(cmd) = self.pending_commands.pop_front()
+        {
+            // Method name and call id only: the params can carry page content and secrets.
+            tracing::trace!(method = %cmd.method, id = %cmd.id, "Sending");
+            let msg = serde_json::to_string(&cmd)?;
+            self.ws.start_send_unpin(msg.into())?;
+            self.pending_flush = Some(cmd);
         }
         Ok(())
     }

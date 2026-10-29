@@ -415,10 +415,10 @@ impl Browser {
     pub async fn new_page(&self, params: impl Into<CreateTargetParams>) -> Result<Page> {
         let (tx, rx) = oneshot_channel();
         let mut params = params.into();
-        if let Some(id) = self.browser_context.id() {
-            if params.browser_context_id.is_none() {
-                params.browser_context_id = Some(id.clone());
-            }
+        if let Some(id) = self.browser_context.id()
+            && params.browser_context_id.is_none()
+        {
+            params.browser_context_id = Some(id.clone());
         }
 
         self.sender
@@ -638,8 +638,8 @@ async fn ws_url_from_output(
                         let start_offset = stderr_bytes.len() - byte_count;
                         let new_bytes = &stderr_bytes[start_offset..];
                         let line = String::from_utf8_lossy(new_bytes);
-                        if let Some((_, ws)) = line.rsplit_once("listening on ") {
-                            if ws.starts_with("ws") && ws.contains("devtools/browser") {
+                        if let Some((_, ws)) = line.rsplit_once("listening on ")
+                            && ws.starts_with("ws") && ws.contains("devtools/browser") {
                                 let ws_url = ws.trim().to_string();
                                 // Keep draining stderr in the background so Chrome never hits EPIPE
                                 // or blocks on a full OS pipe buffer during long runs.
@@ -648,7 +648,6 @@ async fn ws_url_from_output(
                                 });
                                 return Ok(ws_url);
                             }
-                        }
                     }
                 }
             }
