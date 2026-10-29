@@ -457,9 +457,9 @@ impl Target {
         }
     }
 
-    /// Stop recovering: the target stays detached, and whoever waits for its
-    /// page — a `reattach_target`, or the `new_page` whose first
-    /// initialization lost its session — gets `error`.
+    /// End an attach or recovery attempt, leaving the target detached. Whoever
+    /// waits for its page — a `reattach_target`, or the `new_page` whose first
+    /// initialization failed — gets `error`.
     fn give_up_recovery(&mut self, error: CdpError) {
         if let Some(waiter) = self.reattach_waiter.take() {
             let _ = waiter.send(Err(CdpError::msg(error.to_string())));
@@ -736,8 +736,8 @@ impl Target {
             // chain like a success, so a target whose `Page.enable` was refused
             // still called itself Initialized — and then never saw a page event
             // (screen-play-rs#1035). Fail the initialization instead: the next
-            // `poll` reports Chrome's error to whoever waits and closes the
-            // target, as a timed-out command already did. Measured before
+            // `poll` reports Chrome's error to whoever waits and closes an
+            // attached target, as a timed-out command already did. Measured before
             // tightening: 1,722 initialization responses over launch, connect,
             // two concurrent clients, OOPIF/worker pages and tabs closed
             // mid-initialization — none was an error.
@@ -765,6 +765,15 @@ impl Target {
                     message = %err.message,
                     "initialization command failed"
                 );
+                if method == AttachToTargetParams::IDENTIFIER
+                    && self.session_id.is_none()
+                    && !self.reattaching
+                {
+                    // A refused first attach never owned a session. End the
+                    // attempt and answer both callers without closing the tab.
+                    self.give_up_recovery(CdpError::Chrome(err.clone()));
+                    return;
+                }
                 if self.init_error.is_none() {
                     self.init_error = Some((method.to_string(), err.clone()));
                 }
@@ -890,9 +899,8 @@ impl Target {
     }
 
     /// End a failed initialization. A target initializing for the first time
-    /// reports `error` to whoever waits and is closed. A RE-attach is not
-    /// closed — the tab is the user's — but reports `error` to a waiting
-    /// `reattach_target` and, if it should stay attached, tries again within
+    /// reports `error` to whoever waits and is closed only if it has a session.
+    /// A RE-attach stays open and, if it should stay attached, tries again within
     /// [`RECOVERY_BUDGET`] (the error may be the old session's last word);
     /// once that is spent it stays detached (screen-play-rs#1041).
     fn fail_initialization(&mut self, error: CdpError, now: Instant) -> Option<TargetEvent> {
@@ -919,6 +927,10 @@ impl Target {
             // forever (codex R1).
             self.give_up_recovery(error);
             return detach_failed;
+        }
+        if self.session_id.is_none() {
+            self.give_up_recovery(error);
+            return None;
         }
         // A `reattach_target` that joined this first initialization hears the
         // error too, not only `new_page` (codex R11).
@@ -1018,7 +1030,15 @@ impl Target {
                 ));
             }
             TargetInit::InitializingFrame(cmds) => {
-                self.session_id.as_ref()?;
+                if self.session_id.is_none() {
+                    if !self.attach_in_flight {
+                        // No session and no attach left to provide one: nothing
+                        // can finish this chain or answer its callers later.
+                        let ev = self.fail_initialization(CdpError::NoResponse, now);
+                        return self.continue_after_failure(ev, cx, now);
+                    }
+                    return None;
+                }
                 if let Poll::Ready(poll) = cmds.poll(now) {
                     return match poll {
                         None => {
@@ -1602,6 +1622,108 @@ mod init_error_tests {
             }
             other => panic!("the waiter should get Chrome's error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_refused_first_attach_answers_both_callers_without_closing_the_target() {
+        let mut t = page_target();
+        t.session_id = None;
+        let (tx, mut rx) = futures::channel::oneshot::channel();
+        t.initiator = Some(tx);
+        assert!(matches!(poll(&mut t), Some(TargetEvent::Attach(..))));
+        let (tx, mut waiter) = futures::channel::oneshot::channel();
+        t.reattach(Instant::now(), tx);
+
+        t.on_response(
+            reply(Some((-32000, "not_allowlisted"))),
+            AttachToTargetParams::IDENTIFIER,
+        );
+
+        match rx.try_recv() {
+            Ok(Some(Err(CdpError::Chrome(error)))) => {
+                assert_eq!(error.code, -32000);
+                assert_eq!(error.message, "not_allowlisted");
+            }
+            other => panic!("the initiator must get the attach error, got {other:?}"),
+        }
+        let error = waiter.try_recv().unwrap().unwrap().unwrap_err();
+        assert!(error.to_string().contains("not_allowlisted"));
+        assert!(!t.attach_in_flight);
+        assert!(t.init_error.is_none());
+        assert!(t.is_initialized());
+        assert!(!t.expects_session());
+        assert!(poll(&mut t).is_none());
+    }
+
+    #[test]
+    fn an_attach_error_after_a_session_arrives_still_closes_the_target() {
+        let mut t = page_target();
+        t.session_id = None;
+        assert!(matches!(poll(&mut t), Some(TargetEvent::Attach(..))));
+        t.set_session_id(SessionId::from("S1".to_string()));
+        t.on_response(
+            reply(Some((-32000, "attach failed"))),
+            AttachToTargetParams::IDENTIFIER,
+        );
+        match poll(&mut t) {
+            Some(TargetEvent::Request(req)) => {
+                assert_eq!(req.method, CloseTargetParams::IDENTIFIER);
+                assert!(req.session_id.is_none());
+            }
+            other => panic!("expected the target to be closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_frame_initialization_without_a_session_or_pending_attach_answers_both_callers() {
+        for timed_out in [false, true] {
+            let mut t = page_target();
+            t.session_id = None;
+            let (tx, mut rx) = futures::channel::oneshot::channel();
+            t.initiator = Some(tx);
+            assert!(matches!(poll(&mut t), Some(TargetEvent::Attach(..))));
+            let (tx, mut waiter) = futures::channel::oneshot::channel();
+            t.reattach(Instant::now(), tx);
+            // While an attach can still provide a session, no frame command
+            // may be sent and neither caller should be answered yet.
+            assert!(poll(&mut t).is_none());
+            assert!(rx.try_recv().unwrap().is_none());
+            assert!(waiter.try_recv().unwrap().is_none());
+
+            if timed_out {
+                assert!(t.on_attach_timed_out(t.attach_attempt));
+            } else {
+                t.attach_in_flight = false;
+            }
+            assert!(poll(&mut t).is_none(), "the tab must stay open");
+            let error = rx.try_recv().unwrap().unwrap().unwrap_err();
+            if timed_out {
+                assert!(matches!(error, CdpError::Timeout));
+            } else {
+                assert!(matches!(error, CdpError::NoResponse));
+            }
+            assert!(waiter.try_recv().unwrap().unwrap().is_err());
+            assert!(!t.attach_in_flight);
+            assert!(t.is_initialized());
+            assert!(!t.expects_session());
+        }
+    }
+
+    #[test]
+    fn a_refused_recovery_attach_still_retries() {
+        let mut t = page_target();
+        assert!(t.begin_reattach(Instant::now(), true));
+        let (tx, mut waiter) = futures::channel::oneshot::channel();
+        t.reattach(Instant::now(), tx);
+        assert!(matches!(poll(&mut t), Some(TargetEvent::Attach(..))));
+        t.on_response(
+            reply(Some((-32000, "attach failed"))),
+            AttachToTargetParams::IDENTIFIER,
+        );
+        assert!(matches!(poll(&mut t), Some(TargetEvent::Attach(..))));
+        assert!(waiter.try_recv().unwrap().is_none());
+        assert!(t.reattaching);
+        assert!(t.attach_in_flight);
     }
 
     #[test]
