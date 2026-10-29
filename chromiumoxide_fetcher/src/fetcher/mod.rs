@@ -69,12 +69,15 @@ impl BrowserFetcher {
         let archive_path = folder_path.with_extension("zip");
 
         tracing::debug!(target: "chromiumoxide_fetcher::download", url = %url, archive_path = ?archive_path, "Downloading browser");
-        Runtime::download_file(&url, &archive_path)
-            .await
-            .map_err(FetcherError::DownloadFailed)?;
-        Runtime::unzip(archive_path, folder_path)
-            .await
-            .map_err(FetcherError::InstallFailed)?;
+        if let Err(err) = Runtime::download_file(&url, &archive_path).await {
+            let _ = tokio::fs::remove_file(&archive_path).await;
+            return Err(FetcherError::DownloadFailed(err));
+        }
+        if let Err(err) = Runtime::unzip(archive_path.clone(), folder_path.clone()).await {
+            let _ = tokio::fs::remove_file(&archive_path).await;
+            let _ = tokio::fs::remove_dir_all(&folder_path).await;
+            return Err(FetcherError::InstallFailed(err));
+        }
 
         Ok(())
     }

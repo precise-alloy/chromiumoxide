@@ -9,8 +9,10 @@ use zip::ZipArchive;
 pub struct Runtime;
 
 impl Runtime {
-    pub async fn exists(folder_path: &Path) -> bool {
-        tokio::fs::metadata(folder_path).await.is_ok()
+    pub async fn exists(executable_path: &Path) -> bool {
+        tokio::fs::metadata(executable_path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file())
     }
 
     pub async fn download_json<T>(url: &str) -> anyhow::Result<T>
