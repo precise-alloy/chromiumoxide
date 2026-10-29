@@ -15,7 +15,7 @@ use chromiumoxide_cdp::cdp::events::CdpEvent;
 use chromiumoxide_cdp::cdp::events::CdpEventMessage;
 use chromiumoxide_types::{CallId, Message, Method, Response};
 use chromiumoxide_types::{MethodId, Request as CdpRequest};
-pub(crate) use page::PageInner;
+pub(crate) use page::{PageInner, page_channel_error};
 
 use crate::cmd::{CommandMessage, to_command_response};
 use crate::conn::Connection;
@@ -47,6 +47,9 @@ mod session;
 pub mod target;
 pub mod target_message_future;
 pub mod viewport;
+
+#[cfg(test)]
+mod scripted_peer_tests;
 
 /// The handler that monitors the state of the chromium browser and drives all
 /// the requests and events.
@@ -149,7 +152,17 @@ impl Handler {
         if let Some(nav) = self.navigations.remove(&id) {
             match nav {
                 NavigationRequest::Navigate(mut nav) => {
-                    if nav.navigated {
+                    if resp.error.is_some() {
+                        // The navigation was refused: no page load follows an error answer, so
+                        // it completes now, with that error. It used to be stored while the
+                        // navigation waited for a load that never comes, until the 30 s timeout
+                        // (winclaw#2121, U-3 fix 3). The frame's watcher is dropped too, or the
+                        // page's next navigation would queue behind it until that timeout.
+                        for target in self.targets.values_mut() {
+                            target.frame_manager_mut().abort_navigation(id);
+                        }
+                        let _ = nav.tx.send(Ok(resp));
+                    } else if nav.navigated {
                         let _ = nav.tx.send(Ok(resp));
                     } else {
                         nav.set_response(resp);
@@ -204,8 +217,7 @@ impl Handler {
                                 // initialized
                                 target.set_initiator(tx);
                             } else {
-                                // TODO can this even happen?
-                                panic!("Created target not present")
+                                let _ = tx.send(Err(CdpError::NotFound)).ok();
                             }
                         }
                         Err(err) => {
@@ -219,15 +231,35 @@ impl Handler {
                             let targets: Vec<TargetInfo> = resp.result.target_infos;
                             let results = targets.clone();
                             for target_info in targets {
-                                let target_id = target_info.target_id.clone();
                                 let event: EventTargetCreated = EventTargetCreated { target_info };
                                 self.on_target_created(event);
-                                let attach = AttachToTargetParams::new(target_id);
-                                let _ = self.conn.submit_command(
-                                    attach.identifier(),
-                                    None,
-                                    serde_json::to_value(attach).unwrap(),
-                                );
+                                // Do NOT attach here. `Target::poll` already sends
+                                // `Target.attachToTarget { flatten: true }` for every
+                                // page target it tracks, so this was a second attach on
+                                // the same target — and an UN-flattened one. Chrome then
+                                // delivers that session's events wrapped in
+                                // `Target.receivedMessageFromTarget`, which this crate
+                                // does not handle, so they were dropped; and which of
+                                // the two sessions the `Target` ended up bound to (via
+                                // `on_attached_to_target`) was a race.
+                                //
+                                // When the race was lost, `Page.enable` came back
+                                // "Session with given id not found." — and because
+                                // `Target::on_response` advances the init `CommandChain`
+                                // regardless of the response's error, the target still
+                                // reported `Initialized`. No Page/lifecycle events ever
+                                // reached its `FrameManager` after that, so a later
+                                // `Page.goto` never had its navigation marked complete
+                                // and failed with `CdpError::Timeout` after 30s — even
+                                // though the page had navigated perfectly well.
+                                //
+                                // Measured on Linux/Chromium 141, screen-play-rs #1026
+                                // (`Browser::connect` to a Chrome launched with a URL in
+                                // argv, then `page.goto(other_url)`), 8 runs per cell:
+                                //   as-shipped .......................... 4/8 ok
+                                //   skip the clobber in on_target_created  0/8 ok
+                                //   attach here, but flattened ........... 3/8 ok
+                                //   no attach here (this change) ......... 8/8 ok
                             }
 
                             let _ = tx.send(Ok(results)).ok();
@@ -243,9 +275,25 @@ impl Handler {
                 PendingRequest::ExternalCommand(tx) => {
                     let _ = tx.send(Ok(resp)).ok();
                 }
-                PendingRequest::InternalCommand(target_id) => {
+                PendingRequest::Detach(target_id, session, decision, tx) => {
+                    let result = match resp.error {
+                        Some(err) => {
+                            self.on_detach_failed(&target_id, &session, decision);
+                            Err(CdpError::Chrome(err))
+                        }
+                        None => Ok(()),
+                    };
+                    let _ = tx.send(result);
+                }
+                PendingRequest::InternalCommand(target_id, session, attempt) => {
                     if let Some(target) = self.targets.get_mut(&target_id) {
-                        target.on_response(resp, method.as_ref());
+                        // A command sent on a session the target no longer has
+                        // answers for that old session, not the current
+                        // initialization (screen-play-rs#1041, codex R1); an
+                        // attach answers for its own attempt (codex R4).
+                        if target.answers_current(session.as_deref(), attempt) {
+                            target.on_response(resp, method.as_ref());
+                        }
                     }
                 }
                 PendingRequest::CloseBrowser(tx) => {
@@ -272,12 +320,15 @@ impl Handler {
         Ok(())
     }
 
+    /// `attempt`: the attach attempt, for a target's `Target.attachToTarget`.
     pub(crate) fn submit_internal_command(
         &mut self,
         target_id: TargetId,
         req: CdpRequest,
+        attempt: Option<u64>,
         now: Instant,
     ) -> Result<()> {
+        let session = req.session_id.clone();
         let call_id = self.conn.submit_command(
             req.method.clone(),
             req.session_id.map(Into::into),
@@ -285,7 +336,11 @@ impl Handler {
         )?;
         self.pending_commands.insert(
             call_id,
-            (PendingRequest::InternalCommand(target_id), req.method, now),
+            (
+                PendingRequest::InternalCommand(target_id, session, attempt),
+                req.method,
+                now,
+            ),
         );
         Ok(())
     }
@@ -400,7 +455,30 @@ impl Handler {
         if let Some(ref session_id) = event.session_id {
             if let Some(session) = self.sessions.get(session_id.as_str()) {
                 if let Some(target) = self.targets.get_mut(session.target_id()) {
-                    return target.on_event(event);
+                    if !target.accepts_event_from(session_id) {
+                        // A superseded session's late event (#1041, codex R7).
+                        return;
+                    }
+                    // A target's automatic attachment reports its children on its own session.
+                    let parent_session = SessionId::from(session_id.clone());
+                    let child = match &event.params {
+                        CdpEvent::TargetAttachedToTarget(ev)
+                            if ev.target_info.r#type == "iframe" =>
+                        {
+                            Some(Ok((parent_session, (**ev).clone())))
+                        }
+                        CdpEvent::TargetDetachedFromTarget(ev) => Some(Err(ev.session_id.clone())),
+                        _ => None,
+                    };
+                    target.on_event(event);
+                    match child {
+                        Some(Ok((parent_session, attached))) => {
+                            self.on_child_attached(parent_session, attached)
+                        }
+                        Some(Err(detached)) => self.on_child_detached(&detached),
+                        None => {}
+                    }
+                    return;
                 }
             }
         }
@@ -422,6 +500,48 @@ impl Handler {
     ///
     /// Creates a new `Target` instance and keeps track of it
     fn on_target_created(&mut self, event: EventTargetCreated) {
+        // Target discovery is not idempotent unless this returns early.
+        // `Browser::fetch_targets()` funnels every `TargetInfo` it gets back
+        // through here, so a second fetch used to REPLACE a live `Target` with
+        // a fresh one in `TargetInit::AttachToTarget` — throwing away its
+        // session, its `Page`, and its `FrameManager`, and opening yet another
+        // session on the same target. Screen-play re-fetches on ordinary paths
+        // (`connect`, `find_page_by_url`, `active_page`, `wait_for_popup`), so
+        // that was reachable in normal use, not just at startup. Measured with
+        // a fake CDP server: two `Target.getTargets` responses produced two
+        // `Target.attachToTarget` calls for the same target before this guard,
+        // one after.
+        //
+        // "Already tracked" is NOT the same as "healthy", so the guard is not
+        // simply `contains_key`. CDP may detach a session "for any reason", and
+        // `on_detached_from_target` clears `session_id` for the current one —
+        // leaving a target that finished initializing and can no longer make
+        // progress, because `Target::poll` needs a session. Re-discovery was
+        // the (accidental) way back from that, so it stays the way back: a
+        // target that is `Initialized` with no session is replaced. Everything
+        // else is left alone, including an attach still in flight
+        // (`InitializingFrame` with no session yet) — replacing that is exactly
+        // the double-attach this guard exists to prevent.
+        //
+        // The init-failure path does not need this: `on_initialization_failed`
+        // moves the target to `Closing` and sends `Target.closeTarget`, and the
+        // resulting `targetDestroyed` removes the entry outright.
+        //
+        // screen-play-rs#1041 changed the second half: discovery no longer
+        // REPLACES a target that lost its session — replacing threw away its
+        // network settings, listeners and page channel, and could not tell an
+        // intentional detach from a lost session. A tracked target is never
+        // replaced. If it should be attached and has no session, discovery
+        // starts the same in-place re-attach a lost session starts (rationed
+        // by the recovery budget); a target detached on purpose
+        // (`Browser::detach_target`) is left alone.
+        if let Some(existing) = self.targets.get_mut(&event.target_info.target_id) {
+            // Do not let its metadata freeze at the first snapshot — this
+            // crate does not handle `Target.targetInfoChanged`, so discovery
+            // is the only refresh.
+            existing.on_rediscovered(&event.target_info, Instant::now());
+            return;
+        }
         let browser_ctx = event
             .target_info
             .browser_context_id
@@ -437,20 +557,199 @@ impl Handler {
                 viewport: self.config.viewport.clone(),
                 request_intercept: self.config.request_intercept,
                 cache_enabled: self.config.cache_enabled,
+                stealth_mode: self.config.stealth_mode,
+                session_recovery: self.config.session_recovery,
             },
             browser_ctx,
         );
-        self.target_ids.push(target.target_id().clone());
-        self.targets.insert(target.target_id().clone(), target);
+        // Only schedule an ID that is not scheduled yet. Reaching here for a
+        // target that already has an entry means the revival path above fell
+        // through, and that entry's ID is already in `target_ids` — pushing
+        // unconditionally would leave a DUPLICATE, permanently: the poll loop
+        // re-pushes whatever it finds, so every later tick would poll that
+        // target once per copy and every further detach/revival would add
+        // another. Found by review round 7.
+        //
+        // The gate is `target_ids` itself, and that correction is round 8's.
+        // Round 7 gated on `self.targets` and asserted the two were the same
+        // set. They are NOT: `on_target_destroyed` removes from `targets`
+        // ONLY, and the id stays in `target_ids` until the poll loop next
+        // fails to find it and drops it. So after any destruction the two
+        // legitimately diverge — and a target destroyed and rediscovered
+        // before that sweep would have pushed a duplicate anyway (release) or
+        // tripped the assertion (debug). Asking the scheduler's own list
+        // whether this id is scheduled needs no cross-container invariant, and
+        // it closes the destroy-then-rediscover case that predates round 7.
+        let target_id = target.target_id().clone();
+        if !self.target_ids.contains(&target_id) {
+            self.target_ids.push(target_id.clone());
+        }
+        self.targets.insert(target_id.clone(), target);
+        // The property that actually matters, checked after the fact rather
+        // than assumed: a duplicate here is permanent, because the poll loop
+        // re-pushes whatever it finds. `debug_assert!` so it runs in every
+        // downstream debug test build — screen-play-rs#1026's protocol tests
+        // drive this path on every `cargo test`, and the defect is invisible
+        // from the wire, so a comment could never be more than a claim.
+        debug_assert_eq!(
+            self.target_ids
+                .iter()
+                .filter(|id| **id == target_id)
+                .count(),
+            1,
+            "target {target_id:?} must appear in `target_ids` exactly once"
+        );
     }
 
     /// A new session is attached to a target
     fn on_attached_to_target(&mut self, event: Box<EventAttachedToTarget>) {
         let session = Session::new(event.session_id.clone(), event.target_info.target_id);
+        let mut refuse = false;
         if let Some(target) = self.targets.get_mut(session.target_id()) {
-            target.set_session_id(session.session_id().clone())
+            if !target.desired_attached() {
+                // Detached on purpose while this attach was in flight
+                // (screen-play-rs#1041, codex R1): end the session it brought
+                // instead of adopting it.
+                target.abandon_attachment();
+                refuse = true;
+            } else if target.expects_session() {
+                target.set_session_id(session.session_id().clone())
+            } else {
+                // A session nothing is waiting for — a timed-out attach that
+                // answered after recovery gave up: adopting it would expose a
+                // page whose session never ran its initialization (codex R4).
+                refuse = true;
+            }
+        }
+        if refuse {
+            let params = crate::cdp::browser_protocol::target::DetachFromTargetParams::builder()
+                .session_id(session.session_id().clone())
+                .build();
+            let target_id = session.target_id().clone();
+            let _ = self.submit_internal_command(
+                target_id,
+                CdpRequest {
+                    method: params.identifier(),
+                    session_id: None,
+                    params: serde_json::to_value(params).unwrap(),
+                },
+                None,
+                Instant::now(),
+            );
         }
         self.sessions.insert(event.session_id, session);
+    }
+
+    /// An `iframe` target was auto-attached under a tracked target's session: an out-of-process
+    /// frame. It is tracked as a target of its own, bound to the session it came with and
+    /// initialised like the root, so its events reach it and a frame nested in it attaches too.
+    /// It used to be sent `Runtime.runIfWaitingForDebugger` (by its parent, which still does)
+    /// and nothing else: no domain enabled, so no event ever came from it, and no automatic
+    /// attachment, so a frame nested in it never attached (winclaw#2121, U-3 fix 4).
+    ///
+    /// Not a page: `Browser::pages` still lists pages only. `Browser::get_page` with its id gives
+    /// a handle on its own session.
+    ///
+    /// Not in stealth mode: there a child is left as before, with no domain enabled.
+    fn on_child_attached(&mut self, parent_session: SessionId, event: EventAttachedToTarget) {
+        // Stealth keeps the old behaviour: no domain is enabled on a child. The out-of-process
+        // frames are exactly where captcha and anti-bot scripts run, and `Runtime.enable` there
+        // is the fingerprint stealth exists to avoid (review F1). Stealth also attaches children
+        // without pausing them (`waitForDebuggerOnStart: false`), so none waits to be resumed.
+        if self.config.stealth_mode || !self.config.initialize_child_targets {
+            return;
+        }
+        let target_id = event.target_info.target_id.clone();
+        // A repeated attachment on the same session changes nothing. Anything else tracked under
+        // this id — the same frame on a new session, or a target discovery reported and nobody
+        // polls — is replaced, so the child starts from a clean state on its current session.
+        if let Some(existing) = self.targets.get(&target_id) {
+            if existing.is_child() && existing.session_id() == Some(&event.session_id) {
+                return;
+            }
+            if let Some(removed) = self.targets.remove(&target_id) {
+                self.cleanup_removed_target(removed);
+            }
+        }
+        let browser_ctx = event
+            .target_info
+            .browser_context_id
+            .clone()
+            .map(BrowserContext::from)
+            .filter(|id| self.browser_contexts.contains(id))
+            .unwrap_or_else(|| self.default_browser_context.clone());
+        let target = Target::new_child(
+            event.target_info,
+            TargetConfig {
+                ignore_https_errors: self.config.ignore_https_errors,
+                request_timeout: self.config.request_timeout,
+                // The viewport is the page's.
+                viewport: None,
+                // A request paused on the child's session would reach no listener of the page's.
+                request_intercept: false,
+                cache_enabled: self.config.cache_enabled,
+                stealth_mode: self.config.stealth_mode,
+                session_recovery: self.config.session_recovery,
+            },
+            browser_ctx,
+            event.session_id.clone(),
+        );
+        if !self.target_ids.contains(&target_id) {
+            self.target_ids.push(target_id.clone());
+        }
+        self.targets.insert(target_id.clone(), target);
+        self.sessions.insert(
+            event.session_id.clone(),
+            Session::new_child(event.session_id, target_id, parent_session),
+        );
+    }
+
+    /// Clean up a removed target's session, any in-flight navigations waiting on its frame
+    /// manager, and any nested child sessions/targets auto-attached under its session.
+    fn cleanup_removed_target(&mut self, mut target: Target) {
+        for nav_id in target.frame_manager_mut().drain_navigation_ids() {
+            if let Some(NavigationRequest::Navigate(nav)) = self.navigations.remove(&nav_id) {
+                let _ = nav
+                    .tx
+                    .send(Err(crate::error::ChannelError::PageClosed.into()));
+            }
+        }
+        let Some(session_id) = target.session_id().cloned() else {
+            return;
+        };
+        self.sessions.remove(&session_id);
+        let child_sessions: Vec<SessionId> = self
+            .sessions
+            .values()
+            .filter(|s| s.parent_session() == Some(&session_id))
+            .map(|s| s.session_id().clone())
+            .collect();
+        for child_session in child_sessions {
+            self.on_child_detached(&child_session);
+        }
+    }
+
+    /// A session was detached, reported on its parent's session. If it is an auto-attached
+    /// child's, the child is gone: its session and its target are dropped (a new attachment
+    /// brings it back). Any other session is left to `on_detached_from_target`'s browser-level
+    /// path, as before.
+    fn on_child_detached(&mut self, session_id: &SessionId) {
+        let child = self
+            .sessions
+            .get(session_id)
+            .map(|session| session.target_id().clone())
+            .filter(|id| {
+                self.targets
+                    .get(id)
+                    .is_some_and(|t| t.is_child() && t.session_id() == Some(session_id))
+            });
+        if let Some(target_id) = child {
+            if let Some(target) = self.targets.remove(&target_id) {
+                self.cleanup_removed_target(target);
+            } else {
+                self.sessions.remove(session_id);
+            }
+        }
     }
 
     /// The session was detached from target.
@@ -460,7 +759,34 @@ impl Handler {
         // remove the session
         if let Some(session) = self.sessions.remove(&event.session_id) {
             if let Some(target) = self.targets.get_mut(session.target_id()) {
-                target.session_id_mut().take();
+                // A single target can have multiple attached sessions
+                // simultaneously. Only the CURRENT session is cached
+                // on `target.session_id` / `target.page`; if the event
+                // is for an older/secondary session, leave the live
+                // session intact. Without this guard, detaching an
+                // older session would wipe the cached handle for the
+                // session that's still live, and the next `get_page`
+                // would spuriously return `CdpError::NotFound`.
+                let is_current = target.session_id() == Some(&event.session_id);
+                if is_current {
+                    // screen-play-rs#1041: the target decides what follows —
+                    // re-attach in place if it should stay attached, stay
+                    // detached if it was detached on purpose.
+                    target.on_session_lost(Instant::now());
+                    // Also drop the cached PageHandle so any caller
+                    // that races a `Target.attachToTarget` reply against
+                    // the matching `attachedToTarget` event window —
+                    // the handler drains `HandlerMessage` commands
+                    // (`GetPage`) before connection events in a single
+                    // poll tick, so it's reachable — receives a clean
+                    // `CdpError::NotFound` instead of a `PageHandle`
+                    // bound to the dead session (every command would
+                    // otherwise come back as `-32001: Session with
+                    // given id not found`). Callers treat `NotFound`
+                    // as a retryable signal until the next attached
+                    // event lands.
+                    target.clear_page();
+                }
             }
         }
     }
@@ -468,10 +794,7 @@ impl Handler {
     /// Fired when the target was destroyed in the browser
     fn on_target_destroyed(&mut self, event: EventTargetDestroyed) {
         if let Some(target) = self.targets.remove(&event.target_id) {
-            // TODO shutdown?
-            if let Some(session) = target.session_id() {
-                self.sessions.remove(session);
-            }
+            self.cleanup_removed_target(target);
         }
     }
 
@@ -479,7 +802,63 @@ impl Handler {
     ///
     /// Remove all commands where `now` > `timestamp of command starting point +
     /// request timeout` and notify the senders that their request timed out.
-    fn evict_timed_out_commands(&mut self, now: Instant) {
+    /// Record that `target_id` should stay detached and end its session on the
+    /// browser's own session (screen-play-rs#1041). Answers `tx` when Chrome
+    /// does; a target without a session is answered at once.
+    fn detach_target(&mut self, target_id: TargetId, tx: OneshotSender<Result<()>>, now: Instant) {
+        let Some(target) = self.targets.get_mut(&target_id) else {
+            let _ = tx.send(Ok(()));
+            return;
+        };
+        let Some((session, decision)) = target.begin_detach() else {
+            let _ = tx.send(Ok(()));
+            return;
+        };
+        let params = crate::cdp::browser_protocol::target::DetachFromTargetParams::builder()
+            .session_id(session.clone())
+            .build();
+        let method = params.identifier();
+        match self
+            .conn
+            .submit_command(method.clone(), None, serde_json::to_value(params).unwrap())
+        {
+            Ok(call_id) => {
+                self.pending_commands.insert(
+                    call_id,
+                    (
+                        PendingRequest::Detach(
+                            target_id,
+                            session.as_ref().to_string(),
+                            decision,
+                            tx,
+                        ),
+                        method,
+                        now,
+                    ),
+                );
+            }
+            Err(err) => {
+                self.on_detach_failed(&target_id, session.as_ref(), decision);
+                let _ = tx.send(Err(err.into()));
+            }
+        }
+    }
+
+    /// An intentional detach of `session` failed: if that session is still
+    /// the target's and no newer decision replaced this one, the target is
+    /// attached after all (codex R9: an overlapping detach that succeeded
+    /// must not be undone by one that failed because the session was gone).
+    /// Returns whether the target must be polled again.
+    fn on_detach_failed(&mut self, target_id: &TargetId, session: &str, decision: u64) -> bool {
+        self.targets
+            .get_mut(target_id)
+            .is_some_and(|target| target.on_detach_failed(session, decision))
+    }
+
+    /// Returns whether a target was told its attach timed out: it must be
+    /// polled again, which nothing else may trigger on an idle connection.
+    fn evict_timed_out_commands(&mut self, now: Instant) -> bool {
+        let mut marked = false;
         let timed_out = self
             .pending_commands
             .iter()
@@ -507,13 +886,33 @@ impl Handler {
                     PendingRequest::ExternalCommand(tx) => {
                         let _ = tx.send(Err(CdpError::Timeout));
                     }
-                    PendingRequest::InternalCommand(_) => {}
+                    PendingRequest::Detach(target_id, session, decision, tx) => {
+                        // A restarted initialization needs a poll, which an
+                        // idle connection would not bring (codex R10).
+                        if self.on_detach_failed(&target_id, &session, decision) {
+                            marked = true;
+                        }
+                        let _ = tx.send(Err(CdpError::Timeout));
+                    }
+                    PendingRequest::InternalCommand(target_id, _, Some(attempt)) => {
+                        // An attach that never answered leaves no session to
+                        // time out on; tell the target, or it counts as
+                        // attaching forever (screen-play-rs#1041, codex R3) —
+                        // unless a newer attempt replaced it (codex R4).
+                        if let Some(target) = self.targets.get_mut(&target_id) {
+                            if target.on_attach_timed_out(attempt) {
+                                marked = true;
+                            }
+                        }
+                    }
+                    PendingRequest::InternalCommand(..) => {}
                     PendingRequest::CloseBrowser(tx) => {
                         let _ = tx.send(Err(CdpError::Timeout));
                     }
                 }
             }
         }
+        marked
     }
 
     pub fn event_listeners_mut(&mut self) -> &mut EventListeners {
@@ -570,6 +969,17 @@ impl Stream for Handler {
                             .map(|page| Page::from(page.clone()));
                         let _ = tx.send(page);
                     }
+                    HandlerMessage::Detach(target_id, tx) => {
+                        pin.detach_target(target_id, tx, now);
+                    }
+                    HandlerMessage::Reattach(target_id, tx) => {
+                        match pin.targets.get_mut(&target_id) {
+                            Some(target) => target.reattach(now, tx),
+                            None => {
+                                let _ = tx.send(Err(CdpError::NotFound));
+                            }
+                        }
+                    }
                     HandlerMessage::AddEventListener(req) => {
                         pin.event_listeners.add_listener(req);
                     }
@@ -585,6 +995,15 @@ impl Stream for Handler {
                                 let _ = pin.submit_internal_command(
                                     target.target_id().clone(),
                                     req,
+                                    None,
+                                    now,
+                                );
+                            }
+                            TargetEvent::Attach(req, attempt) => {
+                                let _ = pin.submit_internal_command(
+                                    target.target_id().clone(),
+                                    req,
+                                    Some(attempt),
                                     now,
                                 );
                             }
@@ -597,13 +1016,20 @@ impl Stream for Handler {
                             TargetEvent::NavigationResult(res) => {
                                 pin.on_navigation_lifecycle_completed(res)
                             }
+                            TargetEvent::SessionRestored(ev) => {
+                                // Also to `Browser::event_listener` subscribers,
+                                // so one listener per browser sees every tab's
+                                // restoration (screen-play-rs#1041).
+                                let _ = pin.event_listeners.try_send_custom(
+                                    "Chromiumoxide.sessionRestored",
+                                    serde_json::to_value(&ev).unwrap(),
+                                );
+                            }
                         }
                     }
 
                     // poll the target's event listeners
                     target.event_listeners_mut().poll(cx);
-                    // poll the handler's event listeners
-                    pin.event_listeners_mut().poll(cx);
 
                     pin.targets.insert(id, target);
                     pin.target_ids.push(target_id);
@@ -612,7 +1038,23 @@ impl Stream for Handler {
 
             let mut done = true;
 
-            while let Poll::Ready(Some(ev)) = Pin::new(&mut pin.conn).poll_next(cx) {
+            loop {
+                let ev = match Pin::new(&mut pin.conn).poll_next(cx) {
+                    Poll::Ready(Some(ev)) => ev,
+                    // The connection ended (the peer closed the socket, or it dropped after an
+                    // error item). Nothing can arrive or be sent any more, so the handler ends
+                    // too: a caller's `while let Some(_) = handler.next().await` returns, and
+                    // dropping the handler fails every pending call. This used to read as
+                    // "nothing read": the handler returned `Pending` and never ended — its
+                    // eviction timer still woke it, but nothing could end it (winclaw#2121, U-3
+                    // fix 2).
+                    Poll::Ready(None) => {
+                        // Deliver what was read before the end, e.g. a page's ending events.
+                        pin.event_listeners_mut().poll(cx);
+                        return Poll::Ready(None);
+                    }
+                    Poll::Pending => break,
+                };
                 match ev {
                     Ok(Message::Response(resp)) => {
                         pin.on_response(resp);
@@ -626,22 +1068,45 @@ impl Stream for Handler {
                     }
                     Err(err @ CdpError::InvalidMessage(_, _)) => {
                         if pin.config.ignore_invalid_messages {
-                            tracing::warn!("WS Invalid message: {}", err);
+                            // Never the text, and not serde's message either: it can quote the
+                            // value it rejected. Category and position are enough to diagnose.
+                            if let CdpError::InvalidMessage(text, parse) = &err {
+                                tracing::warn!(
+                                    category = ?parse.classify(),
+                                    line = parse.line(),
+                                    column = parse.column(),
+                                    len = text.len(),
+                                    "WS invalid message"
+                                );
+                            }
                         } else {
                             return Poll::Ready(Some(Err(err)));
                         }
                     }
                     Err(err) => {
-                        tracing::error!("WS Connection error: {:?}", err);
+                        // Display, not Debug: Debug of a wrapped WS message prints its payload.
+                        tracing::error!("WS Connection error: {}", err);
                         return Poll::Ready(Some(Err(err)));
                     }
                 }
                 done = false;
             }
 
+            // Poll the handler's own event listeners once per pass, whether or not any target
+            // exists. They used to be polled only inside the per-target loop above, so an event
+            // that arrived when no target was left — the ending of a session's last page, whose
+            // `Target.targetDestroyed` removes that very target — was queued and never delivered
+            // (winclaw#2121, U-3 fix 1). Polled after the read, so what was read this pass is
+            // delivered this pass.
+            pin.event_listeners_mut().poll(cx);
+
             if pin.evict_command_timeout.poll_ready(cx) {
-                // evict all commands that timed out
-                pin.evict_timed_out_commands(now);
+                // evict all commands that timed out; a target told its attach
+                // timed out is polled again now, not at the next unrelated
+                // wakeup (screen-play-rs#1041, codex R4)
+                if pin.evict_timed_out_commands(now) {
+                    done = false;
+                }
             }
 
             if done {
@@ -669,6 +1134,19 @@ pub struct HandlerConfig {
     pub request_intercept: bool,
     /// Whether to enable cache
     pub cache_enabled: bool,
+    /// Stealth mode: minimize CDP domain enables to reduce bot detection footprint.
+    /// When true, skips Performance.enable, Log.enable, Network.enable (unless
+    /// request_intercept is on), Page.createIsolatedWorld, and sets
+    /// waitForDebuggerOnStart to false.
+    pub stealth_mode: bool,
+    /// Whether a page that loses its session re-attaches in place (screen-play-rs#1041). `false`
+    /// leaves it detached, as an intentional `detach_target` does: for a peer whose detach is the
+    /// end of what it lent — WinClaw's CDP relay serves one lent tab, and a session it ended must
+    /// see nothing more (winclaw#2202).
+    pub session_recovery: bool,
+    /// Whether auto-attached child `iframe` targets are tracked and initialized with their own
+    /// CDP domains (`Page`, `Runtime`, `Network`, `Performance`, `Log`).
+    pub initialize_child_targets: bool,
 }
 
 impl Default for HandlerConfig {
@@ -681,6 +1159,9 @@ impl Default for HandlerConfig {
             request_timeout: Duration::from_millis(REQUEST_TIMEOUT),
             request_intercept: false,
             cache_enabled: true,
+            stealth_mode: false,
+            session_recovery: true,
+            initialize_child_targets: true,
         }
     }
 }
@@ -743,8 +1224,15 @@ enum PendingRequest {
     /// A common request received via a channel (`Page`).
     ExternalCommand(OneshotSender<Result<Response>>),
     /// Requests that are initiated directly from a `Target` (all the
-    /// initialization commands).
-    InternalCommand(TargetId),
+    /// initialization commands): its target, the session it was sent on
+    /// (`None` for a browser-level command such as the attach), and — for a
+    /// `Target.attachToTarget` — which attach attempt of that target it
+    /// belongs to, so an abandoned attempt's answer or timeout cannot land on
+    /// a newer one (screen-play-rs#1041, codex R4).
+    InternalCommand(TargetId, Option<String>, Option<u64>),
+    /// An intentional detach (`Browser::detach_target`): the target, the
+    /// session it ends, and the caller (screen-play-rs#1041, codex R9).
+    Detach(TargetId, String, u64, OneshotSender<Result<()>>),
     // A Request to close the browser.
     CloseBrowser(OneshotSender<Result<CloseReturns>>),
 }
@@ -761,6 +1249,13 @@ pub(crate) enum HandlerMessage {
     GetPages(OneshotSender<Vec<Page>>),
     Command(CommandMessage),
     GetPage(TargetId, OneshotSender<Option<Page>>),
+    /// Detach a target on purpose: record that it should stay detached and
+    /// end its session, both here — so a caller that stops waiting cannot
+    /// leave the intent recorded without the detach sent (screen-play-rs#1041,
+    /// codex R9).
+    Detach(TargetId, OneshotSender<Result<()>>),
+    /// Re-attach a target in place and answer with its page once initialized.
+    Reattach(TargetId, OneshotSender<Result<Page>>),
     AddEventListener(EventListenerRequest),
     CloseBrowser(OneshotSender<Result<CloseReturns>>),
 }

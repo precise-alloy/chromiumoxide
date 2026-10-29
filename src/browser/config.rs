@@ -97,6 +97,13 @@ pub struct BrowserConfig {
 
     /// Avoid easy bot detection by setting `navigator.webdriver` to false
     pub(crate) hidden: bool,
+
+    /// Whether a page that loses its session automatically re-attaches in place.
+    pub session_recovery: bool,
+
+    /// Whether auto-attached child `iframe` targets are tracked and initialized with their own
+    /// CDP domains (`Page`, `Runtime`, `Network`, `Performance`, `Log`).
+    pub initialize_child_targets: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +129,8 @@ pub struct BrowserConfigBuilder {
     request_intercept: bool,
     cache_enabled: bool,
     hidden: bool,
+    session_recovery: bool,
+    initialize_child_targets: bool,
 }
 
 impl BrowserConfig {
@@ -158,6 +167,8 @@ impl Default for BrowserConfigBuilder {
             request_intercept: false,
             cache_enabled: true,
             hidden: false,
+            session_recovery: true,
+            initialize_child_targets: true,
         }
     }
 }
@@ -334,6 +345,26 @@ impl BrowserConfigBuilder {
         self
     }
 
+    pub fn session_recovery(mut self, enabled: bool) -> Self {
+        self.session_recovery = enabled;
+        self
+    }
+
+    pub fn disable_session_recovery(mut self) -> Self {
+        self.session_recovery = false;
+        self
+    }
+
+    pub fn initialize_child_targets(mut self, enabled: bool) -> Self {
+        self.initialize_child_targets = enabled;
+        self
+    }
+
+    pub fn disable_child_target_init(mut self) -> Self {
+        self.initialize_child_targets = false;
+        self
+    }
+
     pub fn build(self) -> std::result::Result<BrowserConfig, String> {
         let executable = if let Some(e) = self.executable {
             e
@@ -362,6 +393,8 @@ impl BrowserConfigBuilder {
             request_intercept: self.request_intercept,
             cache_enabled: self.cache_enabled,
             hidden: self.hidden,
+            session_recovery: self.session_recovery,
+            initialize_child_targets: self.initialize_child_targets,
         })
     }
 }
@@ -373,7 +406,14 @@ impl BrowserConfig {
         if self.disable_default_args {
             builder.args(self.args.clone());
         } else {
-            builder.args(DEFAULT_ARGS.clone()).args(self.args.clone());
+            // User/config args first, then fill in DEFAULT_ARGS only for keys
+            // the user did NOT set. This makes an explicit arg (e.g.
+            // `lang=ko-KR`) REPLACE the matching default (`lang=en_US`) instead
+            // of merging into `--lang=en_US,ko-KR`. Mirrors the `has()`-gated
+            // `remote-debugging-port` default below.
+            builder
+                .args(self.args.clone())
+                .arg_defaults(DEFAULT_ARGS.clone());
         }
 
         if !builder.has("remote-debugging-port") {
@@ -392,7 +432,7 @@ impl BrowserConfig {
 
         if let Some(ref user_data) = self.user_data_dir {
             builder.arg(Arg::value("user-data-dir", user_data.display()));
-        } else {
+        } else if !builder.has("user-data-dir") {
             // If the user did not specify a data directory, this would default to the systems default
             // data directory. In most cases, we would rather have a fresh instance of Chromium. Specify
             // a temp dir just for chromiumoxide instead.
@@ -457,7 +497,7 @@ impl BrowserConfig {
 
 /// These are passed to the Chrome binary by default.
 /// Via https://github.com/puppeteer/puppeteer/blob/4846b8723cf20d3551c0d755df394cc5e0c82a94/src/node/Launcher.ts#L157
-static DEFAULT_ARGS: [ArgConst; 24] = [
+static DEFAULT_ARGS: [ArgConst; 23] = [
     ArgConst::key("disable-background-networking"),
     ArgConst::values(
         "enable-features",
@@ -480,7 +520,7 @@ static DEFAULT_ARGS: [ArgConst; 24] = [
     ArgConst::values("force-color-profile", &["srgb"]),
     ArgConst::key("metrics-recording-only"),
     ArgConst::key("no-first-run"),
-    ArgConst::key("enable-automation"),
+    // ArgConst::key("enable-automation"),  // Removed: triggers "controlled by automated test software" banner
     ArgConst::values("password-store", &["basic"]),
     ArgConst::key("use-mock-keychain"),
     ArgConst::values("enable-blink-features", &["IdleDetection"]),

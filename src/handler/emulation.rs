@@ -42,7 +42,7 @@ impl EmulationManager {
             .build()
             .unwrap();
 
-        let set_touch = SetTouchEmulationEnabledParams::new(true);
+        let set_touch = SetTouchEmulationEnabledParams::new(viewport.has_touch);
 
         let chain = CommandChain::new(
             vec![
@@ -60,6 +60,34 @@ impl EmulationManager {
 
         self.needs_reload = self.emulating_mobile != viewport.emulating_mobile
             || self.has_touch != viewport.has_touch;
+        self.emulating_mobile = viewport.emulating_mobile;
+        self.has_touch = viewport.has_touch;
         chain
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_commands_respect_viewport_touch_setting() {
+        let mut manager = EmulationManager::new(Duration::from_secs(5));
+        let mut chain = manager.init_commands(&Viewport {
+            has_touch: false,
+            ..Default::default()
+        });
+        let mut commands = Vec::new();
+        while let std::task::Poll::Ready(Some(Ok((method, params)))) =
+            chain.poll(std::time::Instant::now())
+        {
+            commands.push((method.to_string(), params));
+            chain.received_response(&method);
+        }
+        let touch = commands
+            .iter()
+            .find(|(m, _)| m == "Emulation.setTouchEmulationEnabled")
+            .expect("touch command");
+        assert_eq!(touch.1["enabled"], false);
     }
 }
