@@ -194,8 +194,8 @@ pub struct FrameManager {
     request_timeout: Duration,
     /// Track currently in progress navigation
     pending_navigations: VecDeque<(FrameNavigationRequest, NavigationWatcher)>,
-    /// Navigations ended by a session replacement, reported by `poll`.
-    failed_navigations: VecDeque<NavigationId>,
+    /// Navigations ended by a session replacement or missing frame, reported by `poll`.
+    failed_navigations: VecDeque<NavigationError>,
     /// The currently ongoing navigation
     navigation: Option<(NavigationWatcher, Instant)>,
 }
@@ -235,10 +235,12 @@ impl FrameManager {
         // being sent on the new one: they would load a document before the
         // caller's state (UA, init scripts) is back on it (codex final).
         if let Some((watcher, _)) = self.navigation.take() {
-            self.failed_navigations.push_back(watcher.id);
+            self.failed_navigations
+                .push_back(NavigationError::SessionReplaced { id: watcher.id });
         }
         for (req, _) in self.pending_navigations.drain(..) {
-            self.failed_navigations.push_back(req.id);
+            self.failed_navigations
+                .push_back(NavigationError::SessionReplaced { id: req.id });
         }
         for frame in self.frames.values_mut() {
             frame.clear_contexts();
@@ -255,7 +257,11 @@ impl FrameManager {
             ids.push(watcher.id);
         }
         ids.extend(self.pending_navigations.drain(..).map(|(req, _)| req.id));
-        ids.extend(self.failed_navigations.drain(..));
+        ids.extend(
+            self.failed_navigations
+                .drain(..)
+                .map(|err| *err.navigation_id()),
+        );
         ids
     }
 
@@ -352,10 +358,8 @@ impl FrameManager {
     }
 
     pub fn poll(&mut self, now: Instant) -> Option<FrameEvent> {
-        if let Some(id) = self.failed_navigations.pop_front() {
-            return Some(FrameEvent::NavigationResult(Err(
-                NavigationError::SessionReplaced { id },
-            )));
+        if let Some(err) = self.failed_navigations.pop_front() {
+            return Some(FrameEvent::NavigationResult(Err(err)));
         }
         // check if the navigation completed
         if let Some((watcher, deadline)) = self.navigation.take() {
@@ -412,6 +416,12 @@ impl FrameManager {
     pub fn goto(&mut self, req: FrameNavigationRequest) {
         if let Some(frame_id) = self.main_frame.clone() {
             self.navigate_frame(frame_id, req);
+        } else {
+            self.failed_navigations
+                .push_back(NavigationError::FrameNotFound {
+                    id: req.id,
+                    frame: FrameId::from(String::new()),
+                });
         }
     }
 
@@ -471,6 +481,24 @@ impl FrameManager {
             }
         } else {
             let mut f = if let Some(main) = self.main_frame.take() {
+                if main != frame.id {
+                    if let Some((watcher, _)) = self.navigation.as_mut()
+                        && watcher.frame_id == main
+                    {
+                        watcher.frame_id = frame.id.clone();
+                    }
+                    for (req, watcher) in &mut self.pending_navigations {
+                        if watcher.frame_id == main {
+                            watcher.frame_id = frame.id.clone();
+                            if let Some(params) = req.req.params.as_object_mut() {
+                                params.insert(
+                                    "frameId".to_string(),
+                                    serde_json::Value::String(frame.id.as_ref().to_string()),
+                                );
+                            }
+                        }
+                    }
+                }
                 if let Some(mut main_frame) = self.frames.remove(&main) {
                     for child in &main_frame.child_frames {
                         self.remove_frames_recursively(child);
@@ -739,11 +767,11 @@ pub struct FrameNavigationRequest {
 
 impl FrameNavigationRequest {
     pub fn new(id: NavigationId, req: Request) -> Self {
-        Self {
-            id,
-            req,
-            timeout: Duration::from_millis(REQUEST_TIMEOUT),
-        }
+        Self::with_timeout(id, req, Duration::from_millis(REQUEST_TIMEOUT))
+    }
+
+    pub fn with_timeout(id: NavigationId, req: Request, timeout: Duration) -> Self {
+        Self { id, req, timeout }
     }
 
     /// This will set the id of the frame into the `params` `frameId` field.
