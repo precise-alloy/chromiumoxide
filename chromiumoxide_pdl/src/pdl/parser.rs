@@ -56,13 +56,13 @@ pub fn parse_pdl(input: &str) -> Result<Protocol<'_>, Error> {
         }
 
         if let Some(caps) = regex!("^(experimental )?(deprecated )?domain (.*)").captures(line) {
-            if let Some(domain) = protocol.domains.last_mut() {
-                if let Some(mut element) = element.take() {
-                    if let Some(member) = member.take() {
-                        element.add_member(member)?;
-                    }
-                    element.consume(domain);
+            if let Some(domain) = protocol.domains.last_mut()
+                && let Some(mut element) = element.take()
+            {
+                if let Some(member) = member.take() {
+                    element.add_member(member)?;
                 }
+                element.consume(domain);
             }
 
             let domain = Domain {
@@ -263,11 +263,11 @@ pub fn parse_pdl(input: &str) -> Result<Protocol<'_>, Error> {
                 domain: borrowed!(caps.get(1)).unwrap(),
                 name: None,
             };
-            if let Some(desc) = description.as_ref() {
-                if let Some(caps) = regex!("^Use '([^']+)' instead$").captures(desc) {
-                    let name = caps.get(1).unwrap().as_str();
-                    redirect.name = name.rsplit('.').next().map(str::to_string).map(Cow::Owned);
-                }
+            if let Some(desc) = description.as_ref()
+                && let Some(caps) = regex!("^Use '([^']+)' instead$").captures(desc)
+            {
+                let name = caps.get(1).unwrap().as_str();
+                redirect.name = name.rsplit('.').next().map(str::to_string).map(Cow::Owned);
             }
             match element
                 .as_mut()
@@ -325,13 +325,13 @@ pub fn parse_pdl(input: &str) -> Result<Protocol<'_>, Error> {
         bail!("line {}: unknown token `{}`", line_num, line)
     }
 
-    if let Some(domain) = protocol.domains.last_mut() {
-        if let Some(mut element) = element.take() {
-            if let Some(member) = member.take() {
-                element.add_member(member)?;
-            }
-            element.consume(domain);
+    if let Some(domain) = protocol.domains.last_mut()
+        && let Some(mut element) = element.take()
+    {
+        if let Some(member) = member.take() {
+            element.add_member(member)?;
         }
+        element.consume(domain);
     }
 
     protocol.version = version.ok_or_else(|| format_err!("Missing version"))?;
