@@ -10,8 +10,7 @@ use futures::task::{Context, Poll};
 
 use chromiumoxide_cdp::cdp::CdpEventMessage;
 use chromiumoxide_cdp::cdp::browser_protocol::page::{
-    AddScriptToEvaluateOnNewDocumentParams, CreateIsolatedWorldParams, FrameId,
-    GetFrameTreeParams,
+    AddScriptToEvaluateOnNewDocumentParams, CreateIsolatedWorldParams, FrameId, GetFrameTreeParams,
 };
 use chromiumoxide_cdp::cdp::browser_protocol::{
     browser::BrowserContextId,

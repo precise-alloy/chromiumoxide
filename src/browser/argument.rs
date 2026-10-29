@@ -24,10 +24,11 @@ impl ArgsBuilder {
 
     pub fn arg<T: Into<Arg>>(&mut self, arg: T) -> &mut Self {
         let arg = arg.into();
-        if let Some(values) = self.0.get_mut(&arg.key) {
-            values.extend(arg.values);
-        } else {
-            self.0.insert(arg.key, arg.values);
+        let entry = self.0.entry(arg.key).or_default();
+        for value in arg.values {
+            if !entry.contains(&value) {
+                entry.push(value);
+            }
         }
         self
     }
@@ -52,13 +53,19 @@ impl ArgsBuilder {
     ///   [`super::config::BrowserConfig::launch`].
     /// * **Comma-list switches** ([`MERGEABLE_LIST_SWITCHES`], e.g.
     ///   `disable-features`): the default's values are unioned with any
-    ///   user-set ones, so a caller adding a feature flag still keeps
-    ///   chromiumoxide's built-in `disable-features=TranslateUI` etc.
+    ///   user-set ones without duplicating shared entries, so a caller adding a
+    ///   feature flag still keeps chromiumoxide's built-in
+    ///   `disable-features=TranslateUI` etc.
     pub fn arg_defaults<T: Into<Arg>>(&mut self, args: impl IntoIterator<Item = T>) -> &mut Self {
         for arg in args {
             let arg = arg.into();
             if MERGEABLE_LIST_SWITCHES.contains(&arg.key.as_str()) {
-                self.0.entry(arg.key).or_default().extend(arg.values);
+                let entry = self.0.entry(arg.key).or_default();
+                for value in arg.values {
+                    if !entry.contains(&value) {
+                        entry.push(value);
+                    }
+                }
             } else {
                 self.0.entry(arg.key).or_insert(arg.values);
             }
@@ -84,16 +91,44 @@ pub struct Arg {
 }
 
 impl Arg {
+    fn normalize_key(key: &str) -> String {
+        key.strip_prefix("--").unwrap_or(key).to_string()
+    }
+
+    fn parse_switch(raw: &str) -> Self {
+        let stripped = raw.strip_prefix("--").unwrap_or(raw);
+        if let Some((key, value)) = stripped.split_once('=') {
+            let values = if MERGEABLE_LIST_SWITCHES.contains(&key) {
+                value
+                    .split(',')
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            } else {
+                vec![value.to_string()]
+            };
+            Self {
+                key: key.to_string(),
+                values,
+            }
+        } else {
+            Self {
+                key: stripped.to_string(),
+                values: Vec::new(),
+            }
+        }
+    }
+
     pub fn key(key: impl AsRef<str>) -> Self {
         Self {
-            key: key.as_ref().to_string(),
+            key: Self::normalize_key(key.as_ref()),
             values: Vec::new(),
         }
     }
 
     pub fn value(key: impl AsRef<str>, value: impl fmt::Display) -> Self {
         Self {
-            key: key.as_ref().to_string(),
+            key: Self::normalize_key(key.as_ref()),
             values: vec![value.to_string()],
         }
     }
@@ -103,7 +138,7 @@ impl Arg {
         values: impl IntoIterator<Item = impl fmt::Display>,
     ) -> Self {
         Self {
-            key: key.as_ref().to_string(),
+            key: Self::normalize_key(key.as_ref()),
             values: values.into_iter().map(|v| v.to_string()).collect(),
         }
     }
@@ -111,37 +146,25 @@ impl Arg {
 
 impl From<(&str, &str)> for Arg {
     fn from((key, value): (&str, &str)) -> Self {
-        Self {
-            key: key.to_string(),
-            values: vec![value.to_string()],
-        }
+        Self::value(key, value)
     }
 }
 
 impl From<(&str, &[&str])> for Arg {
     fn from((key, values): (&str, &[&str])) -> Self {
-        Self {
-            key: key.to_string(),
-            values: values.iter().map(|v| v.to_string()).collect(),
-        }
+        Self::values(key, values)
     }
 }
 
 impl From<&str> for Arg {
     fn from(value: &str) -> Self {
-        Self {
-            key: value.to_string(),
-            values: Vec::new(),
-        }
+        Self::parse_switch(value)
     }
 }
 
 impl From<String> for Arg {
     fn from(value: String) -> Self {
-        Self {
-            key: value,
-            values: Vec::new(),
-        }
+        Self::parse_switch(&value)
     }
 }
 
@@ -232,6 +255,33 @@ mod tests {
         assert!(
             rendered[0].contains("TranslateUI"),
             "default flag kept: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn string_switches_strip_leading_dashes_and_parse_values() {
+        let mut b = ArgsBuilder::new();
+        b.args([
+            "--disable-infobars",
+            "--window-position=0,0",
+            "--lang=ko-KR",
+            "--enable-features=NetworkService,CDPScreenshotNewSurface",
+        ])
+        .arg_defaults([
+            Arg::value("lang", "en_US"),
+            Arg::values(
+                "enable-features",
+                ["NetworkService", "NetworkServiceInProcess"],
+            ),
+        ]);
+        assert_eq!(
+            rendered(b),
+            vec![
+                "--disable-infobars",
+                "--enable-features=NetworkService,CDPScreenshotNewSurface,NetworkServiceInProcess",
+                "--lang=ko-KR",
+                "--window-position=0,0",
+            ]
         );
     }
 }

@@ -792,7 +792,10 @@ async fn detach_only(peer: &Peer, browser: &mut Browser) {
         .await
         .expect("the detach did not arrive")
         .expect("listener open");
-    browser.fetch_targets().await.expect("a round trip after the detach");
+    browser
+        .fetch_targets()
+        .await
+        .expect("a round trip after the detach");
 }
 
 /// winclaw#2202: with `session_recovery: false` a lost session stays lost — the handler sends no
@@ -826,7 +829,10 @@ async fn by_default_a_lost_session_is_reattached() {
     detach_only(&peer, &mut browser).await;
     let start = Instant::now();
     while peer.calls("Target.attachToTarget", None).len() < 2 {
-        assert!(start.elapsed() < PROMPT, "no re-attach after the lost session");
+        assert!(
+            start.elapsed() < PROMPT,
+            "no re-attach after the lost session"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
