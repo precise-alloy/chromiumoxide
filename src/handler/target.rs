@@ -690,9 +690,10 @@ impl Target {
 
     /// Tries to create the `PageInner` if this target is already initialized
     pub(crate) fn get_or_create_page(&mut self) -> Option<&Arc<PageInner>> {
-        if matches!(self.init_state, TargetInit::Closing) {
-            // A target whose initialisation failed gives no new handle: `Browser::get_page` ends
-            // with `NotFound` (review F5).
+        if !self.is_initialized() {
+            // Do not expose a Page handle before initialization completes (or after it failed
+            // and entered Closing): `Target::poll` only drains the page channel in `Initialized`,
+            // and emulation/network setup would otherwise race with caller commands.
             return None;
         }
         self.create_page();

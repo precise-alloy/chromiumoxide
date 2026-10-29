@@ -432,7 +432,7 @@ impl BrowserConfig {
 
         if let Some(ref user_data) = self.user_data_dir {
             builder.arg(Arg::value("user-data-dir", user_data.display()));
-        } else {
+        } else if !builder.has("user-data-dir") {
             // If the user did not specify a data directory, this would default to the systems default
             // data directory. In most cases, we would rather have a fresh instance of Chromium. Specify
             // a temp dir just for chromiumoxide instead.

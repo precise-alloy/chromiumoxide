@@ -5,10 +5,12 @@ use std::fmt;
 /// scalar. For these, a default and a user value should be *unioned* (both
 /// contribute); every other switch is scalar, where a user value *replaces* the
 /// default. Used by [`ArgsBuilder::arg_defaults`].
-const MERGEABLE_LIST_SWITCHES: [&str; 3] = [
+const MERGEABLE_LIST_SWITCHES: [&str; 5] = [
     "enable-features",
     "disable-features",
     "enable-blink-features",
+    "disable-blink-features",
+    "load-extension",
 ];
 
 pub struct ArgsBuilder(HashMap<String, Vec<String>>);
@@ -24,11 +26,15 @@ impl ArgsBuilder {
 
     pub fn arg<T: Into<Arg>>(&mut self, arg: T) -> &mut Self {
         let arg = arg.into();
-        let entry = self.0.entry(arg.key).or_default();
-        for value in arg.values {
-            if !entry.contains(&value) {
-                entry.push(value);
+        if MERGEABLE_LIST_SWITCHES.contains(&arg.key.as_str()) {
+            let entry = self.0.entry(arg.key).or_default();
+            for value in arg.values {
+                if !entry.contains(&value) {
+                    entry.push(value);
+                }
             }
+        } else {
+            self.0.insert(arg.key, arg.values);
         }
         self
     }
@@ -282,6 +288,17 @@ mod tests {
                 "--lang=ko-KR",
                 "--window-position=0,0",
             ]
+        );
+    }
+
+    #[test]
+    fn positional_switches_preserve_repeated_values() {
+        let mut b = ArgsBuilder::new();
+        b.arg(Arg::values("window-size", [800, 800]))
+            .arg(Arg::values("window-position", [0, 0]));
+        assert_eq!(
+            rendered(b),
+            vec!["--window-position=0,0", "--window-size=800,800"]
         );
     }
 }
